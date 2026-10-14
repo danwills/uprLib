@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A small PyQt5 desktop tool for browsing Ultra Fractal `.upr` parameter files. `.upr` files contain many named fractal parameter blocks ("UPRs"/"fractals"), some stored as plaintext and some as a custom base64+zlib-compressed blob. The app parses one or more `.upr` files, decodes the compressed entries, infers a parent/child tree from fractal naming conventions, matches entries to pre-rendered images/thumbnails, and shows the result in a filterable `QTreeView` with copy-to-clipboard and "open image" actions.
+A small PyQt6 desktop tool for browsing Ultra Fractal `.upr` parameter files. `.upr` files contain many named fractal parameter blocks ("UPRs"/"fractals"), some stored as plaintext and some as a custom base64+zlib-compressed blob. The app parses one or more `.upr` files, decodes the compressed entries, infers a parent/child tree from fractal naming conventions, matches entries to pre-rendered images/thumbnails, and shows the result in a filterable `QTreeView` with copy-to-clipboard and "open image" actions.
 
 There is no package manifest, build system, or test suite in this repo — it's a single-user utility run directly with the system Python.
 
@@ -20,7 +20,7 @@ python3 uprLib.py -f 2                 # limit number of .upr files loaded
 python3 uprLib.py -c myconfig.config   # use an alternate config file
 ```
 
-Requires `PyQt5` (not currently installed in this environment — `pip install PyQt5` before running/testing GUI changes). External tools invoked at runtime: `ffmpeg` (thumbnail generation) and `gwenview` (opening full-size images) must be on `PATH` for those features to work.
+Requires `PyQt6` (`pip install PyQt6`). External tools invoked at runtime: `ffmpeg` (thumbnail generation) and `gwenview` (opening full-size images) must be on `PATH` for those features to work.
 
 There are no automated tests. Verify changes to `uprLibrary.py` by running the `-g` (no-GUI) path and checking printed counts/output; verify GUI changes by actually launching the window.
 
@@ -43,7 +43,7 @@ Config values are copied onto matching attribute names on `UPRLibrary` via `conf
 - `decodeAndUnzipUPR` / `quadDecode` implement a non-standard base64 variant (bytes within each decoded triplet are reportedly swapped relative to the Ultra Fractal author's original encoder — see comments) followed by zlib decompression. This is reverse-engineered and fragile; don't "fix" it to match standard base64 without re-verifying against real `.upr` data.
 - `UPRLibrary` loads config, globs `*.upr` files under `upr_root_dir`, filters to `upr_active_files`, and builds `UPRFile` instances (respecting `num_upr_file_limit` / `num_upr_limit`).
 
-**`uprLib.py`** — PyQt5 application layer (the file actually run):
+**`uprLib.py`** — PyQt6 application layer (the file actually run):
 - `rebuildParentingDataAsDict` turns the flat list of fractal entries into a parent/child tree purely from naming: it splits fractal names on `_` and treats one fractal as a child of another if its name's underscore-split prefix matches another fractal's name exactly. This is O(n²) over all entries and is the main cost for large libraries. There's a half-implemented alternate scheme based on a `_dotdotdot_` naming marker, currently dead code (guarded by `if temp:` / `if False:`) — do not assume it runs.
 - `addImagePathsToData` globs image directories (`upr_image_root_glob`), generates missing thumbnails via `ffmpeg` into `.thumb.<name>.png` files next to the source images, and attaches `image_path`/`thumb_path` onto matching data entries by stripping the `:<index>` suffix from the fractal name.
 - `UPRLibWindow` is the main widget: a `QStandardItemModel`-backed tree (built by `setDataInTreeWidget`), a filter/sort/reverse/expand toolbar, and actions to copy selected fractal text (re-wrapped as `name { ... }`) or selected fractal names to the clipboard, and to open associated images via `gwenview`. Expand/collapse state is preserved across list rebuilds via `getExpandedStates`/`restoreExpandedStates`, keyed by a `(name, file, index)` tuple since the model is rebuilt from scratch on every filter/sort change.

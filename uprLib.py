@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import sys
 import os
-import pprint
 import copy
 import subprocess
 import fnmatch
@@ -9,34 +8,33 @@ import functools
 from collections import deque
 from typing import Any
 
-from PyQt5.QtWidgets import QWidget
-from PyQt5.QtWidgets import QDesktopWidget
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtWidgets import QShortcut
-from PyQt5.QtWidgets import QTreeView
-from PyQt5.QtWidgets import QVBoxLayout
-from PyQt5.QtWidgets import QHBoxLayout
-from PyQt5.QtWidgets import QGroupBox
-from PyQt5.QtWidgets import QPushButton
-from PyQt5.QtWidgets import QCheckBox
-from PyQt5.QtWidgets import QLineEdit
-from PyQt5.QtWidgets import QAbstractItemView
-from PyQt5.QtWidgets import QAction
-from PyQt5.QtWidgets import QProgressDialog
-from PyQt5.QtWidgets import QMessageBox
-from PyQt5.QtWidgets import QSizePolicy
+from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QTreeView
+from PyQt6.QtWidgets import QVBoxLayout
+from PyQt6.QtWidgets import QHBoxLayout
+from PyQt6.QtWidgets import QGroupBox
+from PyQt6.QtWidgets import QPushButton
+from PyQt6.QtWidgets import QCheckBox
+from PyQt6.QtWidgets import QLineEdit
+from PyQt6.QtWidgets import QAbstractItemView
+from PyQt6.QtWidgets import QProgressDialog
+from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtWidgets import QSizePolicy
 
-from PyQt5.QtGui import QKeySequence
-from PyQt5.QtGui import QPalette
-from PyQt5.QtGui import QColor
-from PyQt5.QtGui import QClipboard
-from PyQt5.QtGui import QStandardItem
-from PyQt5.QtGui import QIcon
+from PyQt6.QtGui import QKeySequence
+from PyQt6.QtGui import QPalette
+from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QClipboard
+from PyQt6.QtGui import QStandardItem
+from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QShortcut
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtCore import QThread
-from PyQt5.QtCore import QModelIndex
-from PyQt5 import QtGui
+from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QThread
+from PyQt6.QtCore import QModelIndex
+from PyQt6 import QtGui
 
 from uprLibrary import *
 import logspinner
@@ -77,21 +75,22 @@ class UPRLibWindow(QWidget):
         self.app = app_val
         
         # Add Ctrl+Q hotkey to quit (Alt+F4 still works, but I prefer Ctrl+Q personally)
-        quit_shortcut_keyseq = QKeySequence(Qt.CTRL + Qt.Key_Q)
+        quit_shortcut_keyseq = QKeySequence(Qt.Modifier.CTRL | Qt.Key.Key_Q)
         self.quit_shortcut = QShortcut(quit_shortcut_keyseq, self)
         self.quit_shortcut.activated.connect(self.quitButtonClicked)
-        
-        copy_shortcut_keyseq = QKeySequence(Qt.CTRL + Qt.Key_C)
+
+        copy_shortcut_keyseq = QKeySequence(Qt.Modifier.CTRL | Qt.Key.Key_C)
         self.copy_shortcut = QShortcut(copy_shortcut_keyseq, self)
         self.copy_shortcut.activated.connect(self.copyToClipboard)
-        
-        openimage_shortcut_keyseq = QKeySequence(Qt.CTRL + Qt.Key_R)
+
+        openimage_shortcut_keyseq = QKeySequence(Qt.Modifier.CTRL | Qt.Key.Key_R)
         self.openimage_shortcut = QShortcut(openimage_shortcut_keyseq, self)
         self.openimage_shortcut.activated.connect(self.openImages)
         
         self.tree = QTreeView(self)
-        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.tree.setContextMenuPolicy(Qt.ActionsContextMenu)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         
         #self.tree.setContextMenuPolicy(Qt.DefaultContextMenu)
         
@@ -119,35 +118,35 @@ class UPRLibWindow(QWidget):
         
         self.filter_checkbox = QCheckBox(self)
         self.filter_checkbox.setText("Enable Filter")
-        self.filter_checkbox.setCheckState(2)
+        self.filter_checkbox.setCheckState(Qt.CheckState.Checked)
         self.filter_checkbox.toggled.connect(self.toggleFilter)
         self.filter_checkbox.setToolTip("Enable filtering of the tree.")
         self.top_group_layout.addWidget(self.filter_checkbox)
         
         self.casesensitive_checkbox = QCheckBox(self)
         self.casesensitive_checkbox.setText("Case Sensitive")
-        self.casesensitive_checkbox.setCheckState(False)
+        self.casesensitive_checkbox.setCheckState(Qt.CheckState.Unchecked)
         self.casesensitive_checkbox.toggled.connect(self.updateList)
         self.casesensitive_checkbox.setToolTip("Make the filtering case sensitive.")
         self.top_group_layout.addWidget(self.casesensitive_checkbox)
         
         self.reverse_checkbox = QCheckBox(self)
         self.reverse_checkbox.setText("Reverse")
-        self.reverse_checkbox.setCheckState(0)
+        self.reverse_checkbox.setCheckState(Qt.CheckState.Unchecked)
         self.reverse_checkbox.toggled.connect(self.updateList)
         self.reverse_checkbox.setToolTip("Reverse the tree.")
         self.top_group_layout.addWidget(self.reverse_checkbox)
         
         self.sort_checkbox = QCheckBox(self)
         self.sort_checkbox.setText("Sort")
-        self.sort_checkbox.setCheckState(2)
+        self.sort_checkbox.setCheckState(Qt.CheckState.Checked)
         self.sort_checkbox.toggled.connect(self.updateList)
         self.sort_checkbox.setToolTip("Sort the tree alphabetically.")
         self.top_group_layout.addWidget(self.sort_checkbox)
         
         self.expand_checkbox = QCheckBox(self)
         self.expand_checkbox.setText("Expand")
-        self.expand_checkbox.setCheckState(2)
+        self.expand_checkbox.setCheckState(Qt.CheckState.Checked)
         update_list_with_full_refresh = functools.partial( self.updateList, save_and_restore_expanded_state=False )
         self.expand_checkbox.toggled.connect(update_list_with_full_refresh)
         self.expand_checkbox.setToolTip("Pre-expand the tree so that we see all entries.")
@@ -191,9 +190,16 @@ class UPRLibWindow(QWidget):
         layout.addWidget(self.quit_button)
 
         self.model = QtGui.QStandardItemModel()
-        self.model.setHorizontalHeaderLabels(["Icon", "Fractal Name","UPR File", "Index In file"])
+        self.model.setHorizontalHeaderLabels(["Icon", "Fractal Name","UPR File", "Index In file", "Layers", "Compressed Size"])
+        # Sort by the raw value we stuff into Qt.ItemDataRole.UserRole (set per-item in
+        # setDataInTreeWidget) rather than the displayed text, so numeric columns sort
+        # numerically (1,2,...,10) instead of alphabetically (1,10,2,...).
+        self.model.setSortRole(Qt.ItemDataRole.UserRole)
         self.tree.header().setDefaultSectionSize(180)
         self.tree.setModel(self.model)
+        self.tree.setSortingEnabled(True)
+        # Start with no column actively sorted (-1), just "whatever order we built it in".
+        self.tree.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
         # Method below!
         if self.verbose:
             print("UPRLibWindow init.. setting data..")
@@ -212,15 +218,15 @@ class UPRLibWindow(QWidget):
                        
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle(dialog_title)
-        msg_box.setWindowModality(Qt.WindowModal)
+        msg_box.setWindowModality(Qt.WindowModality.WindowModal)
         if button_texts :
             for button_text, button_role in zip(button_texts, button_roles):
                 _a_btn = msg_box.addButton(button_text, button_role)
             
-        #ok_btn = msg_box.addButton("OK", QMessageBox.AcceptRole)
-        #cancel_btn = msg_box.addButton("Cancel", QMessageBox.RejectRole)
-        
-        msg_box.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        #ok_btn = msg_box.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+        #cancel_btn = msg_box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+
+        msg_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
         msg_box.setText(dialog_text)
         msg_box.setDetailedText(detailed_text)
@@ -243,7 +249,7 @@ class UPRLibWindow(QWidget):
         
         #msg_box.setLayout(layout)
         #msg_box.exec()
-        msg_box.exec_()
+        msg_box.exec()
         return msg_box
     
     @staticmethod
@@ -381,25 +387,36 @@ class UPRLibWindow(QWidget):
             datacopy = filtered_data
 
         self.setDataInTreeWidget(datacopy)
-        self.tree.resizeColumnToContents(0)
-        
+
+        # Rebuilding the tree from scratch above loses whatever order a header-click
+        # sort had put it in, since QStandardItemModel doesn't keep newly-appended
+        # rows in sorted order automatically. Re-apply it if one is active.
+        sort_section = self.tree.header().sortIndicatorSection()
+        sort_order = self.tree.header().sortIndicatorOrder()
+        if sort_section >= 0:
+            self.model.sort(sort_section, sort_order)
+
         auto_expand = self.expand_checkbox.checkState()
         if auto_expand:
             self.tree.expandAll()
         else:
             self.tree.collapseAll()
-        
+
         if save_and_restore_expanded_state:
             self.restoreExpandedStates(self.tree,previous_expanded_states)
+
+        # Needs to happen after expanding/collapsing, since resizeColumnToContents
+        # only takes currently-visible (expanded) rows into account.
+        self.tree.resizeColumnToContents(0)
 
     def setClipboard(self, with_text):
         # Need to add name and curly braces!
         text_str = with_text#.encode()
         clipboard = self.app.clipboard()
-        clipboard.setText(text_str, QClipboard.Clipboard)
+        clipboard.setText(text_str, QClipboard.Mode.Clipboard)
 
         if clipboard.supportsSelection():
-            clipboard.setText(text_str, QClipboard.Selection)
+            clipboard.setText(text_str, QClipboard.Mode.Selection)
         
         #QThread.msleep(self,1)
     
@@ -478,7 +495,7 @@ class UPRLibWindow(QWidget):
         open_progress = QProgressDialog()
         open_progress.setLabelText("Finding image files..")
         open_progress.setRange(0,len(columns_each_row))
-        open_progress.setWindowModality(Qt.WindowModal)
+        open_progress.setWindowModality(Qt.WindowModality.WindowModal)
         open_progress.setAutoClose(True)
         open_progress.forceShow() #exec_()
         
@@ -546,7 +563,7 @@ class UPRLibWindow(QWidget):
             msg_dtl = "Missing:\n  "
             msg_dtl += "\n  ".join(missing_images)
             btn_labels = ["Open Images Anyway","Cancel"]
-            btn_roles = [ QMessageBox.AcceptRole, QMessageBox.RejectRole ]
+            btn_roles = [ QMessageBox.ButtonRole.AcceptRole, QMessageBox.ButtonRole.RejectRole ]
             msg_box = self.displayMessage("Some Images Were Not Found", 
                                           msg,
                                           msg_dtl,
@@ -555,7 +572,7 @@ class UPRLibWindow(QWidget):
             clicked_btn = msg_box.clickedButton()
             button_role = msg_box.buttonRole( clicked_btn )
             print("Got button_role: " + str( button_role ))
-            if button_role == QMessageBox.RejectRole :
+            if button_role == QMessageBox.ButtonRole.RejectRole :
                 return
            
         image_cmd = [ "gwenview", "-f", "-s", ]
@@ -689,12 +706,33 @@ class UPRLibWindow(QWidget):
                 #print(f"{thumb_filex=}")
                 #test_png_path = "/home/dan/quid/ultraFields/.thumb.baseBlue_doublebasin_crnr_moreIterations.png"
                 icon_item.setData(QIcon(thumb_filex), Qt.ItemDataRole.DecorationRole)
-        
+
+            num_layers = value.get('num_layers')
+            compressed_size = value.get('compressed_size')
+            upr_file_basename = os.path.basename(upr_filex)
+
+            name_item = QtGui.QStandardItem( upr_name_no_ix )
+            name_item.setData( upr_name_no_ix, Qt.ItemDataRole.UserRole )
+
+            file_item = QtGui.QStandardItem( upr_file_basename )
+            file_item.setData( upr_file_basename, Qt.ItemDataRole.UserRole )
+
+            index_item = QtGui.QStandardItem( upr_name_ix )
+            index_item.setData( upr_name_ix, Qt.ItemDataRole.UserRole )
+
+            layers_item = QtGui.QStandardItem( str(num_layers) if num_layers is not None else "" )
+            layers_item.setData( num_layers if num_layers is not None else "", Qt.ItemDataRole.UserRole )
+
+            size_item = QtGui.QStandardItem( f"{compressed_size:,}" if compressed_size is not None else "" )
+            size_item.setData( compressed_size if compressed_size is not None else "", Qt.ItemDataRole.UserRole )
+
             parent.appendRow([
                 icon_item,
-                QtGui.QStandardItem( upr_name_no_ix ),
-                QtGui.QStandardItem( os.path.basename(upr_filex) ),
-                QtGui.QStandardItem( upr_name_ix ),
+                name_item,
+                file_item,
+                index_item,
+                layers_item,
+                size_item,
                 ])
             seen[ijx] = parent.child(parent.rowCount() - 1)
         if self.verbose:
@@ -712,8 +750,6 @@ def listsMatchShortest( alist, blist ) :
     return True    
 
 def rebuildParentingDataAsDict(data_val, shell_ui_enable=False, verbose=0) :
-    # TODO: make this a commandline arg! OFF For now since it's a UI!
-    verbose=10
     spinnerj = logspinner.spinning_cursor() if shell_ui_enable else None
     
     # Flatten data, such that structure can
@@ -805,7 +841,7 @@ def rebuildParentingDataAsDict(data_val, shell_ui_enable=False, verbose=0) :
                     colonsplit = upr_name.split( ":" )
                     uscoresplit = colonsplit[0].split("_")
                     
-                    if verbose > 4:
+                    if verbose:
                         print("got uscoresplit: " + str( uscoresplit ) )
                     
                     # Now check all other fractal names! zomg.. need to speed this approach up!
@@ -827,7 +863,7 @@ def rebuildParentingDataAsDict(data_val, shell_ui_enable=False, verbose=0) :
                                 
                             fupr_data = flat_data[ fupr_key ]
                             if 'ix' in fupr_data :
-                                if verbose > 4:
+                                if verbose:
                                     print( "Matched a parent! setting base-type parent_id to: " + str( fupr_data['ix'] ) )
                                 upr_data['parent_id'] = fupr_data['ix']
                                 upr_data['level'] = max(1, fupr_data['level'] + 1)
@@ -926,12 +962,7 @@ def rebuildParentingDataAsDict(data_val, shell_ui_enable=False, verbose=0) :
     logspinner.endSpinner(spinnerj)
     if verbose:
         print("Final count: " + str( count ))
-        
-    if verbose>5:
-        print("\nResulting dict:")
-        pprint.pprint(flat_kp,width=40)
-        print()
-    
+
     return flat_kp
 
 def addImagePathsToData(data, verbose=False):
@@ -1122,19 +1153,19 @@ if __name__ == "__main__":
 
     # Now use a palette to switch to dark colors:
     palette = QPalette()
-    palette.setColor(QPalette.Window, QColor(53, 53, 53))
-    palette.setColor(QPalette.WindowText, Qt.white)
-    palette.setColor(QPalette.Base, QColor(25, 25, 25))
-    palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-    palette.setColor(QPalette.ToolTipBase, Qt.black)
-    palette.setColor(QPalette.ToolTipText, Qt.white)
-    palette.setColor(QPalette.Text, Qt.white)
-    palette.setColor(QPalette.Button, QColor(53, 53, 53))
-    palette.setColor(QPalette.ButtonText, Qt.white)
-    palette.setColor(QPalette.BrightText, Qt.red)
-    palette.setColor(QPalette.Link, QColor(42, 130, 218))
-    palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-    palette.setColor(QPalette.HighlightedText, Qt.black)
+    palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Base, QColor(25, 25, 25))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.black)
+    palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+    palette.setColor(QPalette.ColorRole.Link, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(42, 130, 218))
+    palette.setColor(QPalette.ColorRole.HighlightedText, Qt.GlobalColor.black)
     # noinspection PyArgumentList
     app.setPalette(palette)
     # QToolTip::setPalette(palette); for the settings to take effect on tooltips
@@ -1169,6 +1200,7 @@ if __name__ == "__main__":
     # upr_file = UPRFile(curr_upr)
     # print("This UPR file has: " + str(len(upr_file.lines)) + " lines.")
     upr_dict = upr_lib.getAllUPRs()
+    upr_meta_dict = upr_lib.getAllUPRMeta()
     # upr_file.getUprDict()
     upr_dict_keys = upr_dict.keys()
 
@@ -1184,12 +1216,15 @@ if __name__ == "__main__":
     for uix, upr_file in enumerate( sorted( upr_dict_keys ) ):
         for ix, uprname in enumerate( upr_dict[ upr_file ].keys() ):
             uprname_clean = uprname.split(":")[0]
+            upr_meta = upr_meta_dict.get(upr_file, {}).get(uprname, {})
             raw_data.append( { 'level':0,
                            'dbid':totalix,
                            'uprid':str(uix)+":"+str(ix),
                            'parent_id':-1,
                            'upr_name': uprname,
-                           'upr_file': upr_file } )
+                           'upr_file': upr_file,
+                           'num_layers': upr_meta.get('num_layers'),
+                           'compressed_size': upr_meta.get('compressed_size') } )
             totalix += 1
             
     if args.verbose:
@@ -1231,11 +1266,11 @@ if __name__ == "__main__":
     sdwindow.resize( xsize, ysize )
     # Move to the middle
     vgeo = sdwindow.frameGeometry()
-    center_point = QDesktopWidget().availableGeometry().center()
+    center_point = screen.availableGeometry().center()
     vgeo.moveCenter(center_point)
     sdwindow.move( vgeo.topLeft() )
     sdwindow.show()
     if args.verbose > 1:
         print("Init all done, starting app!")
-    app.exec_()
+    app.exec()
     # Seems like any prints on lines after this might never happen (Even with flush!)

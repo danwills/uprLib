@@ -26,6 +26,12 @@ def configLinesToDict(lines):
         retdict[lspl[0].strip()] = lspl[1].strip().strip('"')
     return retdict
 
+numLayersRgx = re.compile(r'\blayers\s*=\s*(\d+)')
+
+def extractNumLayers(upr_text):
+    match = numLayersRgx.search(upr_text)
+    return int(match.group(1)) if match else None
+
 class UPRFile:
 
     def __init__(self, path, verbose=0, num_upr_limit=None):
@@ -33,6 +39,7 @@ class UPRFile:
         self.verbose = verbose
         self.lines = self.readFileLines()
         self.num_upr_limit = num_upr_limit
+        self.uprMetaDict = {}
         self.uprEntryDict = self.makeUPREntryDict()
 
     def readFileLines(self):
@@ -85,17 +92,33 @@ class UPRFile:
                     upr_entry_dict[frackey] = fpd_linefix
                     #if self.verbose:
                         #print("[ " + fractal_name + " ] (compressed)")
+
+                    # Compressed size here is the size (in bytes) of the zlib+CRC
+                    # blob prior to base64-style encoding, i.e. 3 bytes per 4
+                    # encoded characters - not the on-disk (base64) size.
+                    self.uprMetaDict[frackey] = {
+                        'num_layers': extractNumLayers(fpd_linefix),
+                        'compressed_size': (len(encoded_bytes) // 4) * 3,
+                    }
                 else:
                     if self.verbose > 4:
                         print("Storing UPR (was already not encoded):" + frackey)
                     upr_entry_dict[frackey] = fractal_payload
                     #if self.verbose:
                         #print("[ " + fractal_name + " ] (uncompressed)")
+
+                    self.uprMetaDict[frackey] = {
+                        'num_layers': extractNumLayers(fractal_payload),
+                        'compressed_size': len(fractal_payload),
+                    }
                 count += 1
         return upr_entry_dict
 
     def getUPRDict(self) :
         return self.uprEntryDict
+
+    def getUPRMetaDict(self) :
+        return self.uprMetaDict
 
 class UPR:
     def __init__(self, name, index, uprtext):
@@ -211,6 +234,13 @@ class UPRLibrary:
         for upr_file in self.upr_files :
             all_uprs[ upr_file.path ] = upr_file.getUPRDict()
         return all_uprs
+
+    # Dict of file-path to { frackey: {'num_layers':.., 'compressed_size':..} }
+    def getAllUPRMeta(self):
+        all_meta = {}
+        for upr_file in self.upr_files :
+            all_meta[ upr_file.path ] = upr_file.getUPRMetaDict()
+        return all_meta
 
 base64alphabet = b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
