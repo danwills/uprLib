@@ -8,6 +8,8 @@ import functools
 from collections import deque
 from typing import Any
 
+from PIL import Image
+
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtWidgets import QTreeView
@@ -91,6 +93,9 @@ class UPRLibWindow(QWidget):
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        # Double-click opens the image viewer instead of the default expand/collapse.
+        self.tree.setExpandsOnDoubleClick(False)
+        self.tree.doubleClicked.connect(self.treeDoubleClicked)
         
         #self.tree.setContextMenuPolicy(Qt.DefaultContextMenu)
         
@@ -483,9 +488,12 @@ class UPRLibWindow(QWidget):
             parents = self.getAllParents(index)
             found_item_cols = self.getItemInfo( parents )
             all_columns.append( found_item_cols )
-            
+
         return all_columns
-    
+
+    def treeDoubleClicked(self, index):
+        self.openImages()
+
     def openImages(self):
         print("Start of openImages")
         images = []
@@ -499,26 +507,29 @@ class UPRLibWindow(QWidget):
         open_progress.setAutoClose(True)
         open_progress.forceShow() #exec_()
         
-        print("\n")
-        print(self.data.keys())
-        print("\n")
-        
+        if self.verbose:
+            print(self.data.keys())
+
         for ixx,found_item_cols in enumerate(columns_each_row):
-            print(f"Iterating Row: {ixx}")
+            if self.verbose:
+                print(f"Iterating Row: {ixx}")
             open_progress.setValue( ixx+1 )
-            
+
             if open_progress.wasCanceled():
                 return
 
-            print(f"Looking for {found_item_cols[1]} in self.data")
+            if self.verbose:
+                print(f"Looking for {found_item_cols[1]} in self.data")
             for key, val in self.data.items():
                 if key.split(":")[1] == found_item_cols[1]:
-                    print(f"FOUND MATCHING data key {key}")# : {val}")
-                    print(f"  {val=}")
+                    if self.verbose:
+                        print(f"FOUND MATCHING data key {key}")
+                        print(f"  {val=}")
 
                     if 'image_path' in val :
                         images.append( val['image_path'] )
-                        print(f"  appended image {val['image_path']}")
+                        if self.verbose:
+                            print(f"  appended image {val['image_path']}")
 
                 else:
                     continue
@@ -1037,18 +1048,36 @@ def addImagePathsToData(data, verbose=False):
                     
                         print( f"Before checking thumb file: {os.path.isfile(thumb_file)=}" )
                         print( f"Before checking thumb file: {glob.glob(thumb_file)=}" )
-                
-                    ff_cmd = [ "ffmpeg", 
+
+                    # ffmpeg's tiff decoder (and Pillow's own decompression-bomb guard)
+                    # chokes on the huge 16k renders - skip those rather than retrying
+                    # (and failing) every startup. Eventually we want to associate
+                    # these with their 2k counterparts instead of thumbnailing them!
+                    try:
+                        with Image.open(globbed_file) as im:
+                            img_w, img_h = im.size
+                    except Image.DecompressionBombError:
+                        if verbose:
+                            print(f"Skipping (image too large to thumbnail): {globbed_file}")
+                        continue
+                    except Exception as e:
+                        if verbose:
+                            print(f"Skipping (could not read image dimensions): {globbed_file} ({e})")
+                        continue
+
+                    ff_cmd = [ "ffmpeg",
                                "-i", globbed_file, 
                                "-vf", "thumbnail,scale=64:-1",
                                thumb_file ]
                            
-                    print( "Running: " + " ".join( ff_cmd ) )
+                    if verbose:
+                        print( "Running: " + " ".join( ff_cmd ) )
                     pope = subprocess.Popen( ff_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE )
                     status = pope.wait()
-                    
-                    print( f"Command status was: {status}" )
-                    
+
+                    if verbose:
+                        print( f"Command status was: {status}" )
+
                     if verbose :
                         print( f"After generating thumb file: {os.path.isfile(thumb_file)=}" )
                         print( f"After generating thumb file: {glob.glob(thumb_file)=}" )
