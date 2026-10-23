@@ -63,10 +63,14 @@ from PyQt6.QtCore import QRectF
 from PyQt6.QtCore import QRect
 from PyQt6.QtCore import QSize
 from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import pyqtSignal
 from PyQt6 import QtGui
 
 from uprLibrary import *
 import logspinner
+from zoomView import ZoomTab
+from zoomView import renderSizeText
+from zoomView import renderTimeText
 
 # Custom role (alongside Qt.ItemDataRole.UserRole, which is already used per-column
 # for numeric sorting) used to stash the full data dict for a tree row's entry,
@@ -859,6 +863,23 @@ class GraphView(QGraphicsView):
         super().contextMenuEvent(event)
 
 
+ZOOMS_COLUMN = 8
+
+
+class ZoomIndexBuilder(QThread):
+    """Builds (and caches) the zoom index off the GUI thread - from scratch
+    it takes several seconds for a big library."""
+
+    built = pyqtSignal(object)
+
+    def __init__(self, upr_lib, parent=None):
+        super().__init__(parent)
+        self.upr_lib = upr_lib
+
+    def run(self):
+        self.built.emit(self.upr_lib.buildZoomIndex())
+
+
 class UPRLibWindow(QWidget):
     """Class for the main uprLib window"""
 
@@ -916,12 +937,16 @@ class UPRLibWindow(QWidget):
         show_in_graph_acion.triggered.connect(self.showSelectedInGraphView)
         self.tree.addAction(show_in_graph_acion)
 
+        show_in_zoom_acion = QAction("Show In Zoom View", self)
+        show_in_zoom_acion.triggered.connect(self.showSelectedInZoomView)
+        self.tree.addAction(show_in_zoom_acion)
+
         treefont = self.tree.font()
         treefont.setPointSize(8)
         self.tree.setFont(treefont)
         self.tree.setUniformRowHeights(True)
 
-        main_tab = QWidget()
+        self.main_tab = main_tab = QWidget()
         layout = QVBoxLayout(main_tab)
 
         self.top_group = QGroupBox(self)
@@ -1003,7 +1028,11 @@ class UPRLibWindow(QWidget):
         # Tooltip did not seem to work with these
         # open_image_acion.setToolTip("Open the pre-rendered images for the selected UPRs if they can be found.")
         self.tree.addAction(open_image_acion)
-        
+
+        open_largest_render_acion = QAction("Open Largest Render", self)
+        open_largest_render_acion.triggered.connect(self.openLargestRenders)
+        self.tree.addAction(open_largest_render_acion)
+
         self.quit_button = QPushButton(self)
         self.quit_button.setText("Quit")
         self.quit_button.clicked.connect(self.quitButtonClicked)
@@ -1016,6 +1045,7 @@ class UPRLibWindow(QWidget):
         self.graph_view.addAction(copy_frac_name_acion)
         self.graph_view.addAction(copy_upr_acion)
         self.graph_view.addAction(open_image_acion)
+        self.graph_view.addAction(open_largest_render_acion)
 
         graph_toolbar = QHBoxLayout()
         graph_toolbar.addWidget(QLabel("Line Width:"))
@@ -1035,14 +1065,28 @@ class UPRLibWindow(QWidget):
         graph_tab_layout.addWidget(self.graph_view)
 
         self.tabs = QTabWidget(self)
+        # Third tab: browse zoom-ins (see zoomView.py). Its zoom index arrives
+        # later via setZoomIndex, since building one from scratch is slow.
+        self.zoom_tab = ZoomTab(open_image=self.openImages,
+                                open_largest_render=self.openLargestRenders,
+                                copy_upr=self.copyToClipboard,
+                                show_in_library=self.showZoomEntryInLibrary)
+        self.zoom_tab.setMessage("Building zoom index...")
+        self.zoom_tab.tier_combo.currentIndexChanged.connect(lambda _i: self.updateZoomCounts())
+
         self.tabs.addTab(main_tab, "Library")
         self.tabs.addTab(graph_tab, "Graph")
+        self.tabs.addTab(self.zoom_tab, "Zoom")
 
         outer_layout = QVBoxLayout(self)
         outer_layout.addWidget(self.tabs)
 
         self.model = QtGui.QStandardItemModel()
-        self.model.setHorizontalHeaderLabels(["Icon", "Fractal Name","UPR File", "Index In file", "Layers", "Compressed Size"])
+        self.model.setHorizontalHeaderLabels(["Icon", "Fractal Name","UPR File", "Index In file", "Layers", "Compressed Size",
+                                              "Render Time", "Largest Render", "Zooms"])
+        self.model.horizontalHeaderItem(ZOOMS_COLUMN).setToolTip(
+            "Zoom-ins directly inside this view (and in total, including zooms inside those),\n"
+            "counting the near-matches picked in the Zoom tab. Sorts by the direct count.")
         # Sort by the raw value we stuff into Qt.ItemDataRole.UserRole (set per-item in
         # setDataInTreeWidget) rather than the displayed text, so numeric columns sort
         # numerically (1,2,...,10) instead of alphabetically (1,10,2,...).
@@ -1065,6 +1109,9 @@ class UPRLibWindow(QWidget):
             print("UPRLibWindow init.. setting data..")
             
         self.data=data_val
+        # (upr_file, upr_name) -> (direct, total) zoom-in counts, filled in
+        # once the zoom index arrives (see setZoomIndex).
+        self.zoom_counts = {}
         self.setDataInTreeWidget(data_val)
         self.upr_lib = upr_lib_val
         self.updateList(save_and_restore_expanded_state=False)
@@ -1138,7 +1185,100 @@ class UPRLibWindow(QWidget):
         copy upr, open images) work the same from either view."""
         if self.tabs.currentWidget() is self.graph_tab:
             return self.graph_view.selectedEntries()
+        if self.tabs.currentWidget() is self.zoom_tab:
+            entry = self.zoom_tab.currentEntry()
+            return [ entry ] if entry else []
         return self.getSelectedTreeEntries()
+
+    def setZoomIndex(self, zoom_index):
+        entries = { (entry['upr_file'], entry['upr_name']): entry for entry in self.data.values() }
+        self.zoom_tab.setData(zoom_index, entries)
+        self.zoom_tab.setMessage("")
+        self.updateZoomCounts()
+
+    def updateZoomCounts(self):
+        """Refills the Library's Zooms column for the Zoom tab's current tier."""
+        zoom_index = self.zoom_tab.canvas.zoom_index
+        if zoom_index is None:
+            return
+        max_tier = self.zoom_tab.canvas.max_tier
+        counts = {}
+
+        def count(key):
+            if key not in counts:
+                children = zoom_index.childrenOf(key, max_tier)
+                counts[key] = (len(children), sum(1 + count(child)[1] for child, _tier in children))
+            return counts[key]
+
+        for key in zoom_index.children[max_tier]:
+            count(key)
+        self.zoom_counts = counts
+
+        # Fill in the existing rows' cells rather than rebuilding the whole
+        # list, which takes a couple of seconds.
+        for entry in self.data.values():
+            tree_item = self.ix_to_tree_item.get(entry['ix'])
+            if tree_item is None:
+                continue
+            parent = tree_item.parent() or self.model.invisibleRootItem()
+            self.setZoomsItem(parent.child(tree_item.row(), ZOOMS_COLUMN), entry)
+        sort_section = self.tree.header().sortIndicatorSection()
+        if sort_section == ZOOMS_COLUMN:
+            self.model.sort(sort_section, self.tree.header().sortIndicatorOrder())
+
+    def setZoomsItem(self, zooms_item, entry):
+        direct_zooms, total_zooms = self.zoom_counts.get( (entry['upr_file'], entry['upr_name']), (0, 0) )
+        zooms_item.setText( "" if not direct_zooms else
+                            f"{direct_zooms} ({total_zooms})" if total_zooms > direct_zooms else str(direct_zooms) )
+        # Direct count first, total as the tie-breaker.
+        zooms_item.setData( direct_zooms + total_zooms / 1e6 if direct_zooms else "", Qt.ItemDataRole.UserRole )
+
+    def showSelectedInZoomView(self):
+        entries = self.getSelectedTreeEntries()
+        if not entries:
+            return
+        entry = entries[-1]
+        if self.zoom_tab.canvas.zoom_index is None:
+            self.displayMessage("Zoom Index Not Ready",
+                                "The zoom index is still being built, try again in a few seconds.",
+                                None)
+            return
+        if not self.zoom_tab.showEntry( (entry['upr_file'], entry['upr_name']) ):
+            self.displayMessage("No View",
+                                entry['upr_name'].split(":")[0] + " has no usable view (no mapping, or an animated one).",
+                                None)
+            return
+        self.tabs.setCurrentWidget(self.zoom_tab)
+
+    def showZoomEntryInLibrary(self):
+        entry = self.zoom_tab.currentEntry()
+        if entry is None:
+            return
+        tree_item = self.ix_to_tree_item.get(entry['ix'])
+        if tree_item is None:
+            self.displayMessage("Not In List",
+                                entry['upr_name'].split(":")[0] + " isn't in the list at the moment (filtered out?).",
+                                None)
+            return
+        self.tabs.setCurrentWidget(self.main_tab)
+        index = tree_item.index()
+        self.tree.selectionModel().select(index, QItemSelectionModel.SelectionFlag.ClearAndSelect
+                                                 | QItemSelectionModel.SelectionFlag.Rows)
+        self.tree.scrollTo(index)
+
+    def openLargestRenders(self):
+        """Opens the biggest render (e.g. the 16k) of each selected entry in
+        a large-image-capable viewer (config key upr_large_image_viewer,
+        default feh)."""
+        entries = self.getActiveSelectionEntries()
+        paths = [ entry['renders'][0]['path'] for entry in entries if entry.get('renders') ]
+        if not paths:
+            self.displayMessage("No Renders Found",
+                                "No renders were found for any of the selected fractals.",
+                                None)
+            return
+        viewer = self.upr_lib.config_dict.get('upr_large_image_viewer', 'feh')
+        subprocess.Popen( [ viewer ] + paths, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL )
 
     def showSelectedInGraphView(self):
         entries = self.getSelectedTreeEntries()
@@ -1514,6 +1654,19 @@ class UPRLibWindow(QWidget):
             size_item = QtGui.QStandardItem( f"{compressed_size:,}" if compressed_size is not None else "" )
             size_item.setData( compressed_size if compressed_size is not None else "", Qt.ItemDataRole.UserRole )
 
+            renders = value.get('renders', [])
+            logged_renders = [ render for render in renders if render.get('log_path') ]
+            render_time_item = QtGui.QStandardItem( renderTimeText(value) )
+            render_time_item.setData( sum( render['estimated_seconds'] for render in logged_renders ) if logged_renders else "",
+                                      Qt.ItemDataRole.UserRole )
+
+            largest_render_item = QtGui.QStandardItem( renderSizeText(renders[0]) if renders else "" )
+            largest_render_item.setData( (renders[0]['width'] or 0) * (renders[0]['height'] or 0) if renders else "",
+                                         Qt.ItemDataRole.UserRole )
+
+            zooms_item = QtGui.QStandardItem()
+            self.setZoomsItem(zooms_item, value)
+
             parent.appendRow([
                 icon_item,
                 name_item,
@@ -1521,6 +1674,9 @@ class UPRLibWindow(QWidget):
                 index_item,
                 layers_item,
                 size_item,
+                render_time_item,
+                largest_render_item,
+                zooms_item,
                 ])
             seen[ijx] = parent.child(parent.rowCount() - 1)
 
@@ -2128,6 +2284,16 @@ if __name__ == "__main__":
     vgeo.moveCenter(center_point)
     sdwindow.move( vgeo.topLeft() )
     sdwindow.show()
+
+    zoom_index = upr_lib.loadZoomIndex()
+    if zoom_index is not None:
+        sdwindow.setZoomIndex(zoom_index)
+    else:
+        if shell_ui:
+            print("Building zoom index in the background..")
+        zoom_index_builder = ZoomIndexBuilder(upr_lib)
+        zoom_index_builder.built.connect(sdwindow.setZoomIndex)
+        zoom_index_builder.start()
     if args.verbose > 1:
         print("Init all done, starting app!")
     app.exec()
