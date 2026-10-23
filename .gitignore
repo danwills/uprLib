@@ -1,0 +1,2 @@
+# Parsed-UPR cache (see UPRCache in uprLibrary.py), plus its SQLite WAL sidecar files.
+uprLibrary.cache.sqlite*

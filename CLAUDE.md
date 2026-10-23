@@ -18,6 +18,8 @@ python3 uprLib.py -u                   # disable shell spinner output
 python3 uprLib.py -n 50                # limit number of UPR entries loaded per file
 python3 uprLib.py -f 2                 # limit number of .upr files loaded
 python3 uprLib.py -c myconfig.config   # use an alternate config file
+python3 uprLib.py --rebuild-cache      # discard the parsed-UPR cache and re-parse everything
+python3 uprLib.py --no-cache           # bypass the cache entirely (e.g. when debugging the parser)
 ```
 
 Requires `PyQt6` and `Pillow` (used to cheaply read image headers so oversized renders are skipped for thumbnailing). `numpy` is optional: if it's installed, the graph view's layout simulation uses it (see below), and if not, it falls back to pure Python. External tools invoked at runtime: `ffmpeg` (thumbnail generation) and `gwenview` (opening full-size images) must be on `PATH` for those features to work.
@@ -33,6 +35,7 @@ Runtime behavior is driven by `uprLibrary.config` (plain `key="value"` lines, `#
 - `upr_current_file` — the "current" file (used by `UPRLibrary.getCurrentUpr`)
 - `upr_image_root_dir` / `upr_image_root_glob` — where rendered fractal images live
 - `upr_image_extensions` — comma-separated extensions to search for (e.g. `tif,png`)
+- `upr_cache_file` — optional; path of the parsed-UPR SQLite cache (defaults to `uprLibrary.cache.sqlite` next to the config file, gitignored)
 
 Config values are copied onto matching attribute names on `UPRLibrary` via `configDictToVars` (an attribute only gets set if `UPRLibrary` already declares it in `__init__`), so adding a new config key requires adding a matching `self.<key> = None` attribute to `UPRLibrary.__init__`.
 
@@ -41,6 +44,7 @@ Config values are copied onto matching attribute names on `UPRLibrary` via `conf
 **`uprLibrary.py`** — data/parsing layer, no Qt dependency:
 - `UPRFile` reads one `.upr` file and extracts fractal blocks with a regex (`name { payload }`), building a dict keyed `"name:index"`. Payloads starting with `::` are treated as compressed and passed through `decodeAndUnzipUPR`. It also records metadata for each entry: the layer count (parsed from `layers=N`) and the compressed size.
 - `decodeAndUnzipUPR` / `quadDecode` implement a non-standard base64 variant (bytes within each decoded triplet are reportedly swapped relative to the Ultra Fractal author's original encoder — see comments) followed by zlib decompression. This is reverse-engineered and fragile; don't "fix" it to match standard base64 without re-verifying against real `.upr` data.
+- `UPRCache` is a SQLite cache of each file's parsed entries and metadata. A file's cached entries are reused only while its `mtime_ns` and size match and `UPRCache.PARSER_VERSION` is unchanged. **Bump `PARSER_VERSION` whenever you change what `UPRFile` produces** (regex, decoding, metadata), or stale cached output will keep being served. A parse limited by `-n` is never written to the cache, but a cached file is truncated to the `-n` limit when read.
 - `UPRLibrary` loads config, globs `*.upr` files under `upr_root_dir`, filters to `upr_active_files`, and builds `UPRFile` instances (respecting `num_upr_file_limit` / `num_upr_limit`).
 
 **`uprLib.py`** — PyQt6 application layer (the file actually run):

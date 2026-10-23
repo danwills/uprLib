@@ -1939,6 +1939,16 @@ if __name__ == "__main__":
                            default=False,
                            action="store_true" )
 
+    argparser.add_argument("--no-cache",
+                           help="Don't read or write the parsed-UPR cache, always re-parse every .upr file.",
+                           default=False,
+                           action="store_true" )
+
+    argparser.add_argument("--rebuild-cache",
+                           help="Discard the parsed-UPR cache and re-parse every .upr file into a fresh one.",
+                           default=False,
+                           action="store_true" )
+
     args = argparser.parse_args()
     
     shell_ui = not args.disable_shell_ui
@@ -1995,6 +2005,8 @@ if __name__ == "__main__":
                           num_upr_limit=args.num_upr_limit,
                           config_filename=args.config_filename,
                           shell_ui=shell_ui,
+                          use_cache=not args.no_cache,
+                          rebuild_cache=args.rebuild_cache,
                           verbose=args.verbose )
     
     # Move this into a button-press!

@@ -4,7 +4,9 @@ import os
 import re
 import zlib
 import glob
+import sqlite3
 import argparse
+import itertools
 import logspinner
 
 def configLinesToDict(lines):
@@ -32,15 +34,105 @@ def extractNumLayers(upr_text):
     match = numLayersRgx.search(upr_text)
     return int(match.group(1)) if match else None
 
+class UPRCache:
+    """SQLite cache of each .upr file's parsed (and decoded) entries, so
+    unchanged files don't have to be re-read and re-decompressed on every
+    startup. A file's cached entries are only used while its mtime and size
+    still match what they were when it was parsed."""
+
+    # Bump this whenever UPRFile's parsed/decoded output changes, so results
+    # cached by older code get re-parsed instead of silently reused.
+    PARSER_VERSION = 1
+
+    def __init__(self, db_path, verbose=0):
+        self.verbose = verbose
+        self.db = sqlite3.connect(db_path)
+        # Skip the default fsync on every per-file commit. WAL + NORMAL can
+        # only lose the most recent writes on a crash/power loss, never
+        # corrupt the db, and a lost write just means a re-parse.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS upr_files (
+                path TEXT PRIMARY KEY,
+                mtime_ns INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                parser_version INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS upr_entries (
+                path TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                frackey TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                num_layers INTEGER,
+                compressed_size INTEGER,
+                PRIMARY KEY (path, position)
+            );
+        """)
+
+    def load(self, path, file_stat):
+        """Returns (entry_dict, meta_dict) as UPRFile would build them, or
+        None if the file isn't cached or has changed since it was."""
+        row = self.db.execute("SELECT mtime_ns, size, parser_version FROM upr_files WHERE path = ?",
+                              (path,)).fetchone()
+        if row != (file_stat.st_mtime_ns, file_stat.st_size, self.PARSER_VERSION):
+            return None
+        entry_dict = {}
+        meta_dict = {}
+        for frackey, payload, num_layers, compressed_size in self.db.execute(
+                "SELECT frackey, payload, num_layers, compressed_size FROM upr_entries "
+                "WHERE path = ? ORDER BY position", (path,)):
+            entry_dict[frackey] = payload
+            meta_dict[frackey] = { 'num_layers': num_layers, 'compressed_size': compressed_size }
+        return entry_dict, meta_dict
+
+    def store(self, path, file_stat, entry_dict, meta_dict):
+        with self.db:
+            self.db.execute("DELETE FROM upr_entries WHERE path = ?", (path,))
+            self.db.executemany(
+                "INSERT INTO upr_entries (path, position, frackey, payload, num_layers, compressed_size) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [ (path, position, frackey, payload,
+                   meta_dict[frackey]['num_layers'], meta_dict[frackey]['compressed_size'])
+                  for position, (frackey, payload) in enumerate(entry_dict.items()) ])
+            self.db.execute("INSERT OR REPLACE INTO upr_files (path, mtime_ns, size, parser_version) "
+                            "VALUES (?, ?, ?, ?)",
+                            (path, file_stat.st_mtime_ns, file_stat.st_size, self.PARSER_VERSION))
+
+    def clear(self):
+        with self.db:
+            self.db.execute("DELETE FROM upr_entries")
+            self.db.execute("DELETE FROM upr_files")
+
+    def close(self):
+        self.db.close()
+
 class UPRFile:
 
-    def __init__(self, path, verbose=0, num_upr_limit=None):
+    def __init__(self, path, verbose=0, num_upr_limit=None, cache=None):
         self.path = path
         self.verbose = verbose
-        self.lines = self.readFileLines()
         self.num_upr_limit = num_upr_limit
         self.uprMetaDict = {}
-        self.uprEntryDict = self.makeUPREntryDict()
+        self.from_cache = False
+
+        # Stat before reading, so a file that changes mid-read just looks
+        # stale next time rather than being cached as its newer self.
+        file_stat = os.stat(self.path)
+        cached = cache.load(self.path, file_stat) if cache else None
+        if cached is not None:
+            self.lines = None
+            self.uprEntryDict, self.uprMetaDict = cached
+            self.from_cache = True
+            if num_upr_limit:
+                self.uprEntryDict = dict(itertools.islice(self.uprEntryDict.items(), num_upr_limit))
+                self.uprMetaDict = { key: self.uprMetaDict[key] for key in self.uprEntryDict }
+        else:
+            self.lines = self.readFileLines()
+            self.uprEntryDict = self.makeUPREntryDict()
+            # A limited (-n) parse only holds part of the file, so don't cache it.
+            if cache and not num_upr_limit:
+                cache.store(self.path, file_stat, self.uprEntryDict, self.uprMetaDict)
 
     def readFileLines(self):
         if not os.path.isfile(self.path):
@@ -132,9 +224,11 @@ class UPRLibrary:
                  num_upr_file_limit=None, 
                  num_upr_limit=None, 
                  config_filename=None, 
-                 shell_ui=False, 
+                 shell_ui=False,
+                 use_cache=True,
+                 rebuild_cache=False,
                  verbose=False):
-                  
+
         if config_filename:
             self.config_filename = config_filename
         else:
@@ -142,6 +236,10 @@ class UPRLibrary:
         self.upr_root_dir = None
         self.upr_current_file = None
         self.upr_active_files = None # List later
+        # Optional config key, defaults to a file next to the config file (see getCacheFilename).
+        self.upr_cache_file = None
+        self.use_cache = use_cache
+        self.rebuild_cache = rebuild_cache
         self.config_dict = {}
         self.verbose = verbose
         self.readConfig()
@@ -191,8 +289,22 @@ class UPRLibrary:
                 return uprfile
         return None
 
+    def getCacheFilename(self):
+        if self.upr_cache_file:
+            return self.upr_cache_file
+        config_dir = os.path.dirname(os.path.abspath(self.config_filename))
+        return os.path.join(config_dir, "uprLibrary.cache.sqlite")
+
     def loadAllUpr(self):
-        
+
+        cache = None
+        if self.use_cache:
+            if self.verbose:
+                print("Using UPR cache: " + self.getCacheFilename())
+            cache = UPRCache(self.getCacheFilename(), verbose=self.verbose)
+            if self.rebuild_cache:
+                cache.clear()
+
         spinner = logspinner.spinning_cursor() if self.shell_ui else None
         
         logspinner.write_spinner(spinner, 
@@ -222,10 +334,17 @@ class UPRLibrary:
                                  prefix="Opening UPRs", 
                                  percent=percent)
                              
-            self.upr_files.append( UPRFile(active_upr, 
+            self.upr_files.append( UPRFile(active_upr,
                                            num_upr_limit=self.num_upr_limit,
+                                           cache=cache,
                                            verbose=self.verbose) )
         logspinner.endSpinner(spinner)
+
+        if cache:
+            cache.close()
+            if self.verbose:
+                num_cached = sum(1 for upr_file in self.upr_files if upr_file.from_cache)
+                print("Loaded " + str(num_cached) + " of " + str(len(self.upr_files)) + " UPR files from cache.")
         # print( "\n".join( active_uprs ) )
 
     # Dict of file-path to UprFile-dict at present!
