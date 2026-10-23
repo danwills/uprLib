@@ -1580,6 +1580,17 @@ def rebuildParentingDataAsDict(data_val, shell_ui_enable=False, verbose=0) :
     # End the spinner line
     logspinner.endSpinner(spinnerj)
     
+    # Index every entry by its underscore-split name, so finding the entries
+    # whose name is a strict underscore-prefix of another's takes a handful
+    # of dict lookups instead of a scan of the whole library per entry
+    # (that scan was O(n^2), ~55s for ~5k entries). Each list keeps
+    # flat_data's insertion order, which matters below since the last
+    # match wins.
+    keys_by_name_split = {}
+    for kpos, fupr_key in enumerate( flat_data.keys() ):
+        name_split = tuple( fupr_key.split(":")[1].split("_") )
+        keys_by_name_split.setdefault( name_split, [] ).append( (kpos, fupr_key) )
+
     dq = deque( flat_data.items() )
     dqiter_count = 0
     oldq = len(dq)
@@ -1628,33 +1639,24 @@ def rebuildParentingDataAsDict(data_val, shell_ui_enable=False, verbose=0) :
                     if verbose:
                         print("got uscoresplit: " + str( uscoresplit ) )
                     
-                    # Now check all other fractal names! zomg.. need to speed this approach up!
-                    for ixf, fupr_key in enumerate( flat_data.keys() ):
-                        frac_name = fupr_key.split(":")[1]
-                        # print("frac_name: " + frac_name )
-                        frac_name_split = frac_name.split("_")
-                        if len( uscoresplit ) > len( frac_name_split ):
-                        
-                            matched = True
-                            
-                            for frix,subname in enumerate( frac_name_split ):
-                                if subname != uscoresplit[ frix ] :
-                                    matched = False
-                                    break
+                    # Every other fractal whose name is a strict underscore-prefix of this one.
+                    parent_matches = []
+                    for prefix_len in range( 1, len( uscoresplit ) ):
+                        parent_matches.extend( keys_by_name_split.get( tuple( uscoresplit[:prefix_len] ), () ) )
+                    # Visit them in flat_data order, as the old full scan did, so the last match still wins.
+                    parent_matches.sort()
 
-                            if not matched:
-                                continue
-                                
-                            fupr_data = flat_data[ fupr_key ]
-                            if 'ix' in fupr_data :
-                                if verbose:
-                                    print( "Matched a parent! setting base-type parent_id to: " + str( fupr_data['ix'] ) )
-                                upr_data['parent_id'] = fupr_data['ix']
-                                upr_data['level'] = max(1, fupr_data['level'] + 1)
-                                flat_kp[upr_key] = upr_data
-                                flat_kp[fupr_key] = fupr_data
-                                # print( "parent data: " + str( fupr_data ) )
-                                #print( "upr data: " + str( upr_data ))
+                    for _kpos, fupr_key in parent_matches:
+                        fupr_data = flat_data[ fupr_key ]
+                        if 'ix' in fupr_data :
+                            if verbose:
+                                print( "Matched a parent! setting base-type parent_id to: " + str( fupr_data['ix'] ) )
+                            upr_data['parent_id'] = fupr_data['ix']
+                            upr_data['level'] = max(1, fupr_data['level'] + 1)
+                            flat_kp[upr_key] = upr_data
+                            flat_kp[fupr_key] = fupr_data
+                            # print( "parent data: " + str( fupr_data ) )
+                            #print( "upr data: " + str( upr_data ))
                                 
                     # Add it whether it was modified or otherwise!
                     flat_kp[upr_key] = upr_data
@@ -1936,7 +1938,7 @@ if __name__ == "__main__":
                            help="Turn off main ui.. for debugging or when you only want to see shell output.",
                            default=False,
                            action="store_true" )
-                           
+
     args = argparser.parse_args()
     
     shell_ui = not args.disable_shell_ui
