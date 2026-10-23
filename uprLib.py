@@ -5,10 +5,16 @@ import copy
 import subprocess
 import fnmatch
 import functools
+import time
 from collections import deque
-from typing import Any
 
 from PIL import Image
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
 
 from PyQt6.QtWidgets import QWidget
 from PyQt6.QtWidgets import QApplication
@@ -23,6 +29,13 @@ from PyQt6.QtWidgets import QAbstractItemView
 from PyQt6.QtWidgets import QProgressDialog
 from PyQt6.QtWidgets import QMessageBox
 from PyQt6.QtWidgets import QSizePolicy
+from PyQt6.QtWidgets import QTabWidget
+from PyQt6.QtWidgets import QGraphicsView
+from PyQt6.QtWidgets import QGraphicsScene
+from PyQt6.QtWidgets import QGraphicsItem
+from PyQt6.QtWidgets import QRubberBand
+from PyQt6.QtWidgets import QSlider
+from PyQt6.QtWidgets import QLabel
 
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtGui import QPalette
@@ -32,22 +45,816 @@ from PyQt6.QtGui import QStandardItem
 from PyQt6.QtGui import QIcon
 from PyQt6.QtGui import QAction
 from PyQt6.QtGui import QShortcut
+from PyQt6.QtGui import QPainter
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QPainterPath
+from PyQt6.QtGui import QBrush
+from PyQt6.QtGui import QPen
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtCore import QThread
 from PyQt6.QtCore import QModelIndex
+from PyQt6.QtCore import QItemSelectionModel
+from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QRectF
+from PyQt6.QtCore import QRect
+from PyQt6.QtCore import QSize
+from PyQt6.QtCore import QTimer
 from PyQt6 import QtGui
 
 from uprLibrary import *
 import logspinner
 
+# Custom role (alongside Qt.ItemDataRole.UserRole, which is already used per-column
+# for numeric sorting) used to stash the full data dict for a tree row's entry,
+# so selections can be resolved back to real data without re-parsing display text.
+UPR_ENTRY_ROLE = Qt.ItemDataRole.UserRole + 1
 
-def getFullPathUsingFilename(find_filename, full_paths) -> Any | None:
-    for full_path in full_paths:
-        path_filename = os.path.basename( full_path )
-        if path_filename == find_filename :
-            return full_path
-    return None
+
+class GraphNode(QGraphicsItem):
+    """A single fractal entry shown as a draggable node in the GraphView."""
+
+    def __init__(self, entry):
+        super().__init__()
+        self.entry = entry
+        self.edges = []
+
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
+        self.setZValue(1)
+
+        self.name = entry.get('upr_name', '').split(":")[0]
+        self.setToolTip(self.name)
+
+        self.pixmap = None
+        thumb_path = entry.get('thumb_path')
+        if thumb_path and os.path.isfile(thumb_path):
+            pix = QPixmap(thumb_path)
+            if not pix.isNull():
+                self.pixmap = pix
+
+        if self.pixmap:
+            self.w = max(self.pixmap.width(), 8)
+            self.h = max(self.pixmap.height(), 8)
+        else:
+            self.w = 48
+            self.h = 48
+
+    def addEdge(self, edge):
+        self.edges.append(edge)
+
+    SHADOW_OFFSET = 4
+    SHADOW_COLOR = QColor(0, 0, 0, 150)
+
+    def boundingRect(self):
+        # pad covers the drop shadow's offset; extra makes room for the
+        # selected-state name label to the right.
+        pad = self.SHADOW_OFFSET + 2
+        extra = 90 if self.isSelected() else 0
+        return QRectF(-self.w/2 - pad, -self.h/2 - pad, self.w + pad*2 + extra, self.h + pad*2)
+
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(QRectF(-self.w/2, -self.h/2, self.w, self.h))
+        return path
+
+    def paint(self, painter, option, widget=None):
+        rect = QRectF(-self.w/2, -self.h/2, self.w, self.h)
+
+        # Cheap drop shadow: just an offset dark shape drawn first, no
+        # QGraphicsEffect/offscreen compositing needed - scales fine to
+        # thousands of nodes.
+        shadow_rect = rect.translated(self.SHADOW_OFFSET, self.SHADOW_OFFSET)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self.SHADOW_COLOR))
+        if self.pixmap:
+            painter.drawRect(shadow_rect)
+        else:
+            painter.drawRoundedRect(shadow_rect, 6, 6)
+
+        if self.pixmap:
+            painter.drawPixmap(rect.topLeft(), self.pixmap)
+        else:
+            painter.setBrush(QBrush(QColor(90, 90, 90)))
+            painter.setPen(QPen(QColor(40, 40, 40)))
+            painter.drawRoundedRect(rect, 6, 6)
+
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if self.isSelected():
+            painter.setPen(QPen(QColor(255, 200, 0), 2))
+        else:
+            painter.setPen(QPen(QColor(20, 20, 20), 1))
+        painter.drawRect(rect)
+
+        # Hovering shows the name as a tooltip (see setToolTip above); selected
+        # nodes additionally show it directly next to the node.
+        if self.isSelected():
+            painter.setPen(QPen(QColor(230, 230, 230)))
+            painter.setFont(QFont("", 7))
+            text_rect = QRectF(rect.right() + 4, rect.top(), 200, rect.height())
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.name)
+
+    def itemChange(self, change, value):
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged:
+            for edge in self.edges:
+                edge.adjust()
+            scene = self.scene()
+            if scene is not None:
+                scene.wake()
+        elif change == QGraphicsItem.GraphicsItemChange.ItemSelectedChange:
+            # boundingRect() grows to fit the name label when selected. This
+            # fires before isSelected() actually flips, so calling it here
+            # invalidates the old (correctly-sized) rect - without it,
+            # deselecting left the label behind as a visual trail, since Qt
+            # never knew the larger old rect needed repainting over.
+            self.prepareGeometryChange()
+        return super().itemChange(change, value)
+
+
+class GraphEdge(QGraphicsItem):
+    """A simple line connecting a parent/child pair of GraphNodes."""
+
+    def __init__(self, source_node, dest_node):
+        super().__init__()
+        self.source = source_node
+        self.dest = dest_node
+        self.setZValue(-1)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, False)
+        source_node.addEdge(self)
+        dest_node.addEdge(self)
+
+    def adjust(self):
+        self.prepareGeometryChange()
+
+    SHADOW_OFFSET = QPointF(3, 3)
+    SHADOW_COLOR = QColor(0, 0, 0, 150)
+
+    def boundingRect(self):
+        # Generous margin: covers the shadow offset plus the widest the
+        # line-width slider allows, regardless of its current setting.
+        extra = 20
+        return QRectF(self.source.pos(), self.dest.pos()).normalized().adjusted(-extra, -extra, extra, extra)
+
+    def paint(self, painter, option, widget=None):
+        scene = self.scene()
+        width = scene.line_width if scene is not None else 2
+
+        # Cheap drop shadow, same trick as GraphNode - an offset, darker,
+        # slightly thicker line drawn first instead of a QGraphicsEffect.
+        painter.setPen(QPen(self.SHADOW_COLOR, width + 2))
+        painter.drawLine(self.source.pos() + self.SHADOW_OFFSET, self.dest.pos() + self.SHADOW_OFFSET)
+
+        painter.setPen(QPen(QColor(170, 170, 170), width))
+        painter.drawLine(self.source.pos(), self.dest.pos())
+
+
+class _QuadTreeNode:
+    """One cell of a Barnes-Hut quadtree: either a leaf holding at most one
+    point, or an internal node with its center of mass/total count and four
+    children. Used to approximate the repulsion force for large graphs in
+    O(n log n) instead of all-pairs O(n^2)."""
+
+    __slots__ = ('x0', 'y0', 'x1', 'y1', 'mass', 'com_x', 'com_y', 'children', 'point_idx')
+
+    def __init__(self, x0, y0, x1, y1):
+        self.x0 = x0
+        self.y0 = y0
+        self.x1 = x1
+        self.y1 = y1
+        self.mass = 0
+        self.com_x = 0.0
+        self.com_y = 0.0
+        self.children = None
+        self.point_idx = None
+
+
+def _buildQuadTree(indices, xs, ys, x0, y0, x1, y1, depth=0):
+    node = _QuadTreeNode(x0, y0, x1, y1)
+    n = len(indices)
+    node.mass = n
+    if n == 0:
+        return node
+    node.com_x = sum(xs[i] for i in indices) / n
+    node.com_y = sum(ys[i] for i in indices) / n
+    # depth cap guards against runaway recursion when many points share (or
+    # nearly share) the same position, which would otherwise subdivide forever.
+    if n <= 1 or depth >= 24:
+        node.point_idx = indices[0]
+        return node
+    mx = (x0 + x1) / 2
+    my = (y0 + y1) / 2
+    quads = ([], [], [], [])
+    for i in indices:
+        quads[(1 if xs[i] >= mx else 0) + (2 if ys[i] >= my else 0)].append(i)
+    node.children = (
+        _buildQuadTree(quads[0], xs, ys, x0, y0, mx, my, depth + 1),
+        _buildQuadTree(quads[1], xs, ys, mx, y0, x1, my, depth + 1),
+        _buildQuadTree(quads[2], xs, ys, x0, my, mx, y1, depth + 1),
+        _buildQuadTree(quads[3], xs, ys, mx, my, x1, y1, depth + 1),
+    )
+    return node
+
+
+def _barnesHutForce(node, x, y, self_idx, theta, repulsion):
+    if node.mass == 0:
+        return 0.0, 0.0
+
+    if node.children is None:
+        if node.point_idx == self_idx:
+            return 0.0, 0.0
+        dx = x - node.com_x
+        dy = y - node.com_y
+        dist_sq = dx*dx + dy*dy
+        if dist_sq < 1.0:
+            dist_sq = 1.0
+        dist = dist_sq ** 0.5
+        force = repulsion * node.mass / dist_sq
+        return (dx / dist) * force, (dy / dist) * force
+
+    dx = x - node.com_x
+    dy = y - node.com_y
+    dist_sq = dx*dx + dy*dy
+    dist = dist_sq ** 0.5 if dist_sq > 1e-12 else 1e-6
+    size = node.x1 - node.x0
+    if size / dist < theta:
+        clamped_dist_sq = dist_sq if dist_sq >= 1.0 else 1.0
+        force = repulsion * node.mass / clamped_dist_sq
+        return (dx / dist) * force, (dy / dist) * force
+
+    fx = 0.0
+    fy = 0.0
+    for child in node.children:
+        cfx, cfy = _barnesHutForce(child, x, y, self_idx, theta, repulsion)
+        fx += cfx
+        fy += cfy
+    return fx, fy
+
+
+class GraphScene(QGraphicsScene):
+    """Holds the node/edge graph and runs a small spring-embedder simulation
+    so the layout smoothly detangles itself, waking up again whenever a node
+    is dragged."""
+
+    REPULSION = 12000.0
+    SPRING_LENGTH = 110.0
+    SPRING_K = 0.02
+    DAMPING = 0.85
+    MAX_STEP = 6.0
+    STEPS_PER_TICK = 4
+    # tick() runs on the GUI thread, so a slow step freezes the whole window
+    # until it returns. Barnes-Hut steps are each already far more expensive
+    # than a plain/numpy one at the node counts where Barnes-Hut kicks in, so
+    # it only does one per timer fire rather than piling up STEPS_PER_TICK of
+    # them - keeps the UI responsive between ticks instead of locking up for
+    # several seconds at a time on very large graphs.
+    BARNES_HUT_STEPS_PER_TICK = 1
+    # A node only counts as "settled" once it has moved less than this (in
+    # scene units) continuously for SETTLE_STABLE_SECONDS - a single quiet
+    # step isn't enough, since one part of a big graph can look still while
+    # another part is still untangling. Wall-clock based rather than a tick
+    # count, so it's not thrown off by how long a tick actually takes.
+    SETTLE_DISTANCE = 1e-6
+    SETTLE_STABLE_SECONDS = 3.0
+    # Belt-and-suspenders safety net in case some configuration genuinely
+    # never settles (e.g. a perpetually-oscillating disconnected cluster) -
+    # high enough to essentially never trigger in normal use.
+    MAX_SECONDS_PER_WAKE = 60.0
+    # Above this many nodes, approximate repulsion with a Barnes-Hut quadtree
+    # (O(n log n)) instead of all-pairs (O(n^2)). The tree itself is built
+    # and walked in plain Python (a quadtree doesn't vectorize well), so its
+    # per-node overhead is much higher than one numpy array op - profiling
+    # found numpy's brute-force approach still winning up to ~4-5k nodes
+    # (e.g. 4000: 900ms numpy vs 1.3s Barnes-Hut; 8000: 4.0s vs 3.2s, Barnes-
+    # Hut ahead; 16000: 16.3s vs 7.4s). Set well into the range where the
+    # crossover is unambiguous rather than where big-O alone suggests.
+    BARNES_HUT_MIN_NODES = 5000
+    BARNES_HUT_THETA = 0.8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Qt's BSP-tree spatial index speeds up hit-testing a mostly-static
+        # scene, but costs more than it saves here since nearly every item
+        # moves on every step - a linear scan is cheaper for this item count.
+        self.setItemIndexMethod(QGraphicsScene.ItemIndexMethod.NoIndex)
+        # Fixed and generously large rather than fitted to content, so
+        # panning feels like an unbounded workspace instead of being
+        # clamped to wherever the graph currently sits.
+        self.setSceneRect(-50000, -50000, 100000, 100000)
+        self.nodes = []
+        self.edges = []
+        self.line_width = 2
+        self._stable_since = []
+        self._wake_started_at = 0.0
+        self.timer = QTimer()
+        self.timer.setInterval(16)
+        self.timer.timeout.connect(self.tick)
+
+    def setLineWidth(self, width):
+        self.line_width = width
+        self.update()
+
+    def addNode(self, node):
+        node._idx = len(self.nodes)
+        self.nodes.append(node)
+        self.addItem(node)
+
+    def addEdge(self, edge):
+        self.edges.append(edge)
+        self.addItem(edge)
+
+    def clearGraph(self):
+        self.timer.stop()
+        self.clear()
+        self.nodes = []
+        self.edges = []
+
+    def wake(self):
+        # Every node's own setPos() during a tick calls this too (see
+        # GraphNode.itemChange) - only reset state when actually waking from
+        # idle (new selection, or a drag after things had settled), not on
+        # every single frame while the simulation is already running.
+        if not self.timer.isActive():
+            now = time.monotonic()
+            self._stable_since = [now] * len(self.nodes)
+            self._wake_started_at = now
+            self.timer.start()
+
+    def _updateStability(self, dxs, dys, now):
+        threshold = self.SETTLE_DISTANCE
+        stable_since = self._stable_since
+        for i in range(len(stable_since)):
+            if abs(dxs[i]) >= threshold or abs(dys[i]) >= threshold:
+                stable_since[i] = now
+
+    def _isFullySettled(self, now):
+        stable_for = self.SETTLE_STABLE_SECONDS
+        return all((now - t) >= stable_for for t in self._stable_since)
+
+    def tick(self):
+        # Runs several substeps per timer fire (see STEPS_PER_TICK), touching
+        # real Qt node objects only twice per node - once to read the starting
+        # position, once to write the final one - instead of once per substep.
+        # An earlier version both rebuilt a QPointF per pairwise interaction
+        # *and* called node.setPos() every substep, and each setPos() cascades
+        # through itemChange() into every connected edge's
+        # prepareGeometryChange(); that PyQt/sip call overhead, not the
+        # underlying arithmetic, was the real bottleneck. When numpy is
+        # available the O(n^2) repulsion force is also vectorized (8-12x
+        # faster again for realistic sizes), and above BARNES_HUT_MIN_NODES it
+        # switches to a Barnes-Hut quadtree approximation (O(n log n)) instead,
+        # for graphs with several thousand or more nodes. No GPU needed, or
+        # useful, at these scales - dispatch/transfer overhead would
+        # dominate well before a GPU's raw throughput advantage caught
+        # up for anything short of very large graphs.
+        n = len(self.nodes)
+        if not n:
+            self.timer.stop()
+            return
+
+        if HAS_NUMPY and n > self.BARNES_HUT_MIN_NODES:
+            settled = self._tickBarnesHut(n)
+        elif HAS_NUMPY:
+            settled = self._tickNumpy(n)
+        else:
+            settled = self._tickPython(n)
+
+        timed_out = (time.monotonic() - self._wake_started_at) >= self.MAX_SECONDS_PER_WAKE
+        if settled or timed_out:
+            self.timer.stop()
+
+    def _tickPython(self, n):
+        xs = [0.0] * n
+        ys = [0.0] * n
+        for i, node in enumerate(self.nodes):
+            pos = node.pos()
+            xs[i] = pos.x()
+            ys[i] = pos.y()
+
+        repulsion = self.REPULSION
+        spring_length = self.SPRING_LENGTH
+        spring_k = self.SPRING_K
+        damping = self.DAMPING
+        max_step = self.MAX_STEP
+
+        now = time.monotonic()
+        for _ in range(self.STEPS_PER_TICK):
+            fxs = [0.0] * n
+            fys = [0.0] * n
+
+            for i in range(n):
+                xi = xs[i]
+                yi = ys[i]
+                fxi = fxs[i]
+                fyi = fys[i]
+                for j in range(i + 1, n):
+                    dx = xi - xs[j]
+                    dy = yi - ys[j]
+                    dist_sq = dx*dx + dy*dy
+                    if dist_sq < 1.0:
+                        dist_sq = 1.0
+                    dist = dist_sq ** 0.5
+                    force_mag = repulsion / dist_sq
+                    fx = (dx / dist) * force_mag
+                    fy = (dy / dist) * force_mag
+                    fxi += fx
+                    fyi += fy
+                    fxs[j] -= fx
+                    fys[j] -= fy
+                fxs[i] = fxi
+                fys[i] = fyi
+
+            for edge in self.edges:
+                i = edge.source._idx
+                j = edge.dest._idx
+                dx = xs[j] - xs[i]
+                dy = ys[j] - ys[i]
+                dist = (dx*dx + dy*dy) ** 0.5
+                if dist < 1.0:
+                    dist = 1.0
+                stretch = dist - spring_length
+                fx = (dx / dist) * stretch * spring_k
+                fy = (dy / dist) * stretch * spring_k
+                fxs[i] += fx
+                fys[i] += fy
+                fxs[j] -= fx
+                fys[j] -= fy
+
+            dxs = [0.0] * n
+            dys = [0.0] * n
+            for i in range(n):
+                dx = fxs[i] * damping
+                dy = fys[i] * damping
+                if dx > max_step:
+                    dx = max_step
+                elif dx < -max_step:
+                    dx = -max_step
+                if dy > max_step:
+                    dy = max_step
+                elif dy < -max_step:
+                    dy = -max_step
+                xs[i] += dx
+                ys[i] += dy
+                dxs[i] = dx
+                dys[i] = dy
+
+            self._updateStability(dxs, dys, now)
+            if self._isFullySettled(now):
+                break
+
+        for i, node in enumerate(self.nodes):
+            node.setPos(xs[i], ys[i])
+
+        return self._isFullySettled(now)
+
+    def _tickNumpy(self, n):
+        xs = np.empty(n)
+        ys = np.empty(n)
+        for i, node in enumerate(self.nodes):
+            pos = node.pos()
+            xs[i] = pos.x()
+            ys[i] = pos.y()
+
+        if self.edges:
+            src_idx = np.fromiter((e.source._idx for e in self.edges), dtype=np.intp, count=len(self.edges))
+            dst_idx = np.fromiter((e.dest._idx for e in self.edges), dtype=np.intp, count=len(self.edges))
+        else:
+            src_idx = dst_idx = np.empty(0, dtype=np.intp)
+
+        repulsion = self.REPULSION
+        spring_length = self.SPRING_LENGTH
+        spring_k = self.SPRING_K
+        damping = self.DAMPING
+        max_step = self.MAX_STEP
+
+        now = time.monotonic()
+        for _ in range(self.STEPS_PER_TICK):
+            dx = xs[:, None] - xs[None, :]
+            dy = ys[:, None] - ys[None, :]
+            dist_sq = dx*dx + dy*dy
+            np.fill_diagonal(dist_sq, 1.0)
+            np.maximum(dist_sq, 1.0, out=dist_sq)
+            dist = np.sqrt(dist_sq)
+            force_mag = repulsion / dist_sq
+            fx_mat = (dx / dist) * force_mag
+            fy_mat = (dy / dist) * force_mag
+            np.fill_diagonal(fx_mat, 0.0)
+            np.fill_diagonal(fy_mat, 0.0)
+            fxs = fx_mat.sum(axis=1)
+            fys = fy_mat.sum(axis=1)
+
+            if src_idx.size:
+                # Edge endpoints can repeat (a node with several children), so
+                # a plain fxs[src_idx] += ... would silently drop all but one
+                # of any repeated index - np.add.at accumulates correctly.
+                edx = xs[dst_idx] - xs[src_idx]
+                edy = ys[dst_idx] - ys[src_idx]
+                edist = np.maximum(np.sqrt(edx*edx + edy*edy), 1.0)
+                stretch = edist - spring_length
+                efx = (edx / edist) * stretch * spring_k
+                efy = (edy / edist) * stretch * spring_k
+                np.add.at(fxs, src_idx, efx)
+                np.add.at(fys, src_idx, efy)
+                np.add.at(fxs, dst_idx, -efx)
+                np.add.at(fys, dst_idx, -efy)
+
+            dxs = np.clip(fxs * damping, -max_step, max_step)
+            dys = np.clip(fys * damping, -max_step, max_step)
+            xs += dxs
+            ys += dys
+
+            self._updateStability(dxs, dys, now)
+            if self._isFullySettled(now):
+                break
+
+        for i, node in enumerate(self.nodes):
+            node.setPos(float(xs[i]), float(ys[i]))
+
+        return self._isFullySettled(now)
+
+    def _tickBarnesHut(self, n):
+        xs = np.empty(n)
+        ys = np.empty(n)
+        for i, node in enumerate(self.nodes):
+            pos = node.pos()
+            xs[i] = pos.x()
+            ys[i] = pos.y()
+
+        if self.edges:
+            src_idx = np.fromiter((e.source._idx for e in self.edges), dtype=np.intp, count=len(self.edges))
+            dst_idx = np.fromiter((e.dest._idx for e in self.edges), dtype=np.intp, count=len(self.edges))
+        else:
+            src_idx = dst_idx = np.empty(0, dtype=np.intp)
+
+        repulsion = self.REPULSION
+        spring_length = self.SPRING_LENGTH
+        spring_k = self.SPRING_K
+        damping = self.DAMPING
+        max_step = self.MAX_STEP
+        theta = self.BARNES_HUT_THETA
+        all_indices = list(range(n))
+
+        now = time.monotonic()
+        for _ in range(self.BARNES_HUT_STEPS_PER_TICK):
+            # Rebuilt every substep since positions move each time - still
+            # O(n log n) overall, versus O(n^2) for all-pairs.
+            x0, x1 = float(xs.min()) - 1.0, float(xs.max()) + 1.0
+            y0, y1 = float(ys.min()) - 1.0, float(ys.max()) + 1.0
+            root = _buildQuadTree(all_indices, xs, ys, x0, y0, x1, y1)
+
+            fxs = np.empty(n)
+            fys = np.empty(n)
+            for i in range(n):
+                fx, fy = _barnesHutForce(root, xs[i], ys[i], i, theta, repulsion)
+                fxs[i] = fx
+                fys[i] = fy
+
+            if src_idx.size:
+                edx = xs[dst_idx] - xs[src_idx]
+                edy = ys[dst_idx] - ys[src_idx]
+                edist = np.maximum(np.sqrt(edx*edx + edy*edy), 1.0)
+                stretch = edist - spring_length
+                efx = (edx / edist) * stretch * spring_k
+                efy = (edy / edist) * stretch * spring_k
+                np.add.at(fxs, src_idx, efx)
+                np.add.at(fys, src_idx, efy)
+                np.add.at(fxs, dst_idx, -efx)
+                np.add.at(fys, dst_idx, -efy)
+
+            dxs = np.clip(fxs * damping, -max_step, max_step)
+            dys = np.clip(fys * damping, -max_step, max_step)
+            xs += dxs
+            ys += dys
+
+            self._updateStability(dxs, dys, now)
+            if self._isFullySettled(now):
+                break
+
+        for i, node in enumerate(self.nodes):
+            node.setPos(float(xs[i]), float(ys[i]))
+
+        return self._isFullySettled(now)
+
+
+class GraphView(QGraphicsView):
+    """Second-tab view: a fluid, draggable node-link graph of selected entries.
+
+    Navigation follows a Houdini-network-editor-ish scheme: no scrollbars, an
+    effectively infinite pannable/zoomable canvas, middle-drag to pan,
+    mouse-wheel to zoom (centered under the cursor), and Alt+right-drag to
+    zoom. Rubber-band and click selection use Shift=add, Ctrl=remove,
+    Ctrl+Shift=toggle - Qt's own rubber-band selection only has a combined
+    "toggle" for Ctrl, with no way to get a separate "remove", so this view
+    implements selection itself rather than using QGraphicsView's built-in
+    RubberBandDrag mode.
+    """
+
+    ZOOM_WHEEL_FACTOR = 1.0015
+    ZOOM_DRAG_FACTOR = 1.004
+    MIN_ZOOM = 0.05
+    MAX_ZOOM = 20.0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.graph_scene = GraphScene(self)
+        self.setScene(self.graph_scene)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Minimal/smart update modes compute a dirty region from each item's
+        # old vs. new boundingRect(); with items constantly moving (and ours
+        # changing shape on selection, plus the drop-shadow below extending
+        # past the "plain" rect) that region math kept leaving stale pixels
+        # behind as trails. Repainting the whole viewport every frame is more
+        # than fast enough here and guarantees no leftovers.
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        # ix -> GraphNode for whatever's currently built - lets UPRLibWindow
+        # keep tree/graph selection in sync without caring how the graph
+        # itself is laid out.
+        self.nodes_by_ix = {}
+
+        self._zoom = 1.0
+        self._panning = False
+        self._pan_last_pos = None
+        self._alt_zooming = False
+        self._alt_zoom_last_pos = None
+
+        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self)
+        self._rubber_band_origin = None
+        self._select_drag_mode = None
+        self._select_drag_start_selection = set()
+
+    def buildGraph(self, entries):
+        self.graph_scene.clearGraph()
+
+        nodes_by_ix = {}
+        for i, entry in enumerate(entries):
+            node = GraphNode(entry)
+            level = entry.get('level') or 0
+            node.setPos(QPointF((i % 6) * 140, level * 160))
+            self.graph_scene.addNode(node)
+            nodes_by_ix[entry.get('ix')] = node
+        self.nodes_by_ix = nodes_by_ix
+
+        for entry in entries:
+            parent_ix = entry.get('parent_id')
+            if parent_ix is None or parent_ix < 0 or parent_ix not in nodes_by_ix:
+                continue
+            node = nodes_by_ix[entry.get('ix')]
+            parent_node = nodes_by_ix[parent_ix]
+            edge = GraphEdge(parent_node, node)
+            self.graph_scene.addEdge(edge)
+
+        self.centerOn(self.graph_scene.itemsBoundingRect().center())
+        self.graph_scene.wake()
+
+    def selectedEntries(self):
+        return [node.entry for node in self.graph_scene.selectedItems() if isinstance(node, GraphNode)]
+
+    # -- Selection (rubber-band and click), Shift=add/Ctrl=remove/Ctrl+Shift=toggle --
+
+    @staticmethod
+    def _selectionModeFor(modifiers):
+        ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if ctrl and shift:
+            return 'toggle'
+        if ctrl:
+            return 'remove'
+        if shift:
+            return 'add'
+        return 'replace'
+
+    def _applySelectionOp(self, touched):
+        mode = self._select_drag_mode
+        start = self._select_drag_start_selection
+        if mode == 'add':
+            new_selection = start | touched
+        elif mode == 'remove':
+            new_selection = start - touched
+        elif mode == 'toggle':
+            new_selection = start ^ touched
+        else:
+            new_selection = touched
+        for node in self.graph_scene.nodes:
+            should_select = node in new_selection
+            if node.isSelected() != should_select:
+                node.setSelected(should_select)
+
+    def _startSelectionDrag(self, event, clicked_node):
+        self._select_drag_start_selection = {n for n in self.graph_scene.nodes if n.isSelected()}
+        self._select_drag_mode = self._selectionModeFor(event.modifiers())
+        if clicked_node is not None:
+            self._applySelectionOp({clicked_node})
+            return
+        self._rubber_band_origin = event.position().toPoint()
+        self._rubber_band.setGeometry(QRect(self._rubber_band_origin, QSize()))
+        self._rubber_band.show()
+
+    # -- Mouse/wheel navigation --
+
+    def wheelEvent(self, event):
+        factor = self.ZOOM_WHEEL_FACTOR ** event.angleDelta().y()
+        self._applyZoom(factor)
+        event.accept()
+
+    def _applyZoom(self, factor):
+        new_zoom = self._zoom * factor
+        new_zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, new_zoom))
+        factor = new_zoom / self._zoom
+        if factor == 1.0:
+            return
+        self._zoom = new_zoom
+        self.scale(factor, factor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._panning = True
+            self._pan_last_pos = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
+        if event.button() == Qt.MouseButton.RightButton and (event.modifiers() & Qt.KeyboardModifier.AltModifier):
+            self._alt_zooming = True
+            self._alt_zoom_last_pos = event.position().toPoint()
+            event.accept()
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            clicked_node = item if isinstance(item, GraphNode) else None
+            mode = self._selectionModeFor(event.modifiers())
+            if mode != 'replace' or clicked_node is None:
+                self._startSelectionDrag(event, clicked_node)
+                event.accept()
+                return
+            # Plain click on a node: fall through to Qt's normal
+            # click-to-select / drag-to-move handling.
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            pos = event.position().toPoint()
+            delta = pos - self._pan_last_pos
+            self._pan_last_pos = pos
+            h = self.horizontalScrollBar()
+            v = self.verticalScrollBar()
+            h.setValue(h.value() - delta.x())
+            v.setValue(v.value() - delta.y())
+            event.accept()
+            return
+
+        if self._alt_zooming:
+            pos = event.position().toPoint()
+            delta_x = pos.x() - self._alt_zoom_last_pos.x()
+            self._alt_zoom_last_pos = pos
+            self._applyZoom(self.ZOOM_DRAG_FACTOR ** delta_x)
+            event.accept()
+            return
+
+        if self._rubber_band.isVisible():
+            rect = QRect(self._rubber_band_origin, event.position().toPoint()).normalized()
+            self._rubber_band.setGeometry(rect)
+            touched = {it for it in self.items(rect) if isinstance(it, GraphNode)}
+            self._applySelectionOp(touched)
+            event.accept()
+            return
+
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton and self._panning:
+            self._panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            event.accept()
+            return
+
+        if event.button() == Qt.MouseButton.RightButton and self._alt_zooming:
+            self._alt_zooming = False
+            event.accept()
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton and self._rubber_band.isVisible():
+            self._rubber_band.hide()
+            event.accept()
+            return
+
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event):
+        # Alt+right-drag is reserved for zooming, not the context menu.
+        if QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier:
+            event.ignore()
+            return
+        super().contextMenuEvent(event)
 
 
 class UPRLibWindow(QWidget):
@@ -102,13 +909,19 @@ class UPRLibWindow(QWidget):
         copy_frac_name_acion = QAction("Copy Fractal Name(s)",self)
         copy_frac_name_acion.triggered.connect(self.copySelectedFractalNames)
         self.tree.addAction(copy_frac_name_acion)
-        
+
+        show_in_graph_acion = QAction("Show Selected In Graph View", self)
+        show_in_graph_acion.triggered.connect(self.showSelectedInGraphView)
+        self.tree.addAction(show_in_graph_acion)
+
         treefont = self.tree.font()
         treefont.setPointSize(8)
         self.tree.setFont(treefont)
         self.tree.setUniformRowHeights(True)
-        layout = QVBoxLayout(self)
-                
+
+        main_tab = QWidget()
+        layout = QVBoxLayout(main_tab)
+
         self.top_group = QGroupBox(self)
         self.top_group_layout = QHBoxLayout()
         
@@ -194,6 +1007,38 @@ class UPRLibWindow(QWidget):
         self.quit_button.clicked.connect(self.quitButtonClicked)
         layout.addWidget(self.quit_button)
 
+        # Second tab: a draggable node/thumbnail graph of whatever's selected in the
+        # tree (via "Show Selected In Graph View"), sharing the same context-menu
+        # actions so selections made there can also be copied/opened.
+        self.graph_view = GraphView()
+        self.graph_view.addAction(copy_frac_name_acion)
+        self.graph_view.addAction(copy_upr_acion)
+        self.graph_view.addAction(open_image_acion)
+
+        graph_toolbar = QHBoxLayout()
+        graph_toolbar.addWidget(QLabel("Line Width:"))
+        self.line_width_slider = QSlider(Qt.Orientation.Horizontal)
+        self.line_width_slider.setMinimum(1)
+        self.line_width_slider.setMaximum(12)
+        self.line_width_slider.setValue(self.graph_view.graph_scene.line_width)
+        self.line_width_slider.setFixedWidth(160)
+        self.line_width_slider.setToolTip("Width of the wires connecting nodes in the graph view.")
+        self.line_width_slider.valueChanged.connect(self.graph_view.graph_scene.setLineWidth)
+        graph_toolbar.addWidget(self.line_width_slider)
+        graph_toolbar.addStretch()
+
+        self.graph_tab = graph_tab = QWidget()
+        graph_tab_layout = QVBoxLayout(graph_tab)
+        graph_tab_layout.addLayout(graph_toolbar)
+        graph_tab_layout.addWidget(self.graph_view)
+
+        self.tabs = QTabWidget(self)
+        self.tabs.addTab(main_tab, "Library")
+        self.tabs.addTab(graph_tab, "Graph")
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.addWidget(self.tabs)
+
         self.model = QtGui.QStandardItemModel()
         self.model.setHorizontalHeaderLabels(["Icon", "Fractal Name","UPR File", "Index In file", "Layers", "Compressed Size"])
         # Sort by the raw value we stuff into Qt.ItemDataRole.UserRole (set per-item in
@@ -203,6 +1048,14 @@ class UPRLibWindow(QWidget):
         self.tree.header().setDefaultSectionSize(180)
         self.tree.setModel(self.model)
         self.tree.setSortingEnabled(True)
+
+        # Keep tree and graph selection in sync in both directions. Guarded by
+        # _syncing_selection so one view's handler applying the other view's
+        # selection doesn't bounce back and forth forever.
+        self._syncing_selection = False
+        self.tree.selectionModel().selectionChanged.connect(self.onTreeSelectionChanged)
+        self.graph_view.graph_scene.selectionChanged.connect(self.onGraphSelectionChanged)
+
         # Start with no column actively sorted (-1), just "whatever order we built it in".
         self.tree.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
         # Method below!
@@ -262,13 +1115,79 @@ class UPRLibWindow(QWidget):
         print("Dialog accept!")
     
     def copySelectedFractalNames(self):
-        print("copySelectedFractalNames yo!")
-        columns_each_row = self.getSelectedAllColumns()
-        # can we sort this by index?!
-        upr_names = "\n".join( [ str(col[1]) for col in columns_each_row ] )
+        entries = self.getActiveSelectionEntries()
+        upr_names = "\n".join( entry['upr_name'].split(":")[0] for entry in entries )
         self.setClipboard( upr_names )
-            
-    
+
+    def getSelectedTreeEntries(self):
+        """Resolves the tree's current row selection back to the full data
+        dict for each row (stashed on the name item in setDataInTreeWidget)."""
+        entries = []
+        for index in self.tree.selectionModel().selectedRows():
+            name_index = index.siblingAtColumn(1)
+            entry = self.model.itemFromIndex(name_index).data(UPR_ENTRY_ROLE)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    def getActiveSelectionEntries(self):
+        """Selection, resolved to full data dicts, from whichever of the tree
+        or graph tabs is currently active - so shared actions (copy name,
+        copy upr, open images) work the same from either view."""
+        if self.tabs.currentWidget() is self.graph_tab:
+            return self.graph_view.selectedEntries()
+        return self.getSelectedTreeEntries()
+
+    def showSelectedInGraphView(self):
+        entries = self.getSelectedTreeEntries()
+        if not entries:
+            return
+        self.graph_view.buildGraph(entries)
+        self.tabs.setCurrentWidget(self.graph_tab)
+        # Newly-built nodes start unselected - bring them into line with
+        # whatever's currently selected in the tree.
+        self.onTreeSelectionChanged()
+
+    def onTreeSelectionChanged(self, *_args):
+        """Mirrors the tree's selection onto whichever graph nodes also
+        represent one of its rows - entries the graph doesn't currently have
+        as a node are simply left alone there."""
+        if self._syncing_selection or not self.graph_view.nodes_by_ix:
+            return
+        self._syncing_selection = True
+        try:
+            selected_ix = { entry['ix'] for entry in self.getSelectedTreeEntries() }
+            for ix, node in self.graph_view.nodes_by_ix.items():
+                should_select = ix in selected_ix
+                if node.isSelected() != should_select:
+                    node.setSelected(should_select)
+        finally:
+            self._syncing_selection = False
+
+    def onGraphSelectionChanged(self):
+        """Mirrors the graph's selection onto the corresponding tree rows."""
+        if self._syncing_selection:
+            return
+        self._syncing_selection = True
+        try:
+            selected_ix = { node.entry['ix']
+                             for node in self.graph_view.graph_scene.selectedItems()
+                             if isinstance(node, GraphNode) }
+            selection_model = self.tree.selectionModel()
+            for ix in self.graph_view.nodes_by_ix:
+                tree_item = self.ix_to_tree_item.get(ix)
+                if tree_item is None:
+                    continue
+                index = tree_item.index()
+                should_select = ix in selected_ix
+                is_selected = selection_model.isSelected(index)
+                if should_select != is_selected:
+                    flag = QItemSelectionModel.SelectionFlag.Select if should_select else QItemSelectionModel.SelectionFlag.Deselect
+                    selection_model.select(index, flag | QItemSelectionModel.SelectionFlag.Rows)
+        finally:
+            self._syncing_selection = False
+
+
     def toggleFilter(self):
         checkbox_state = self.filter_checkbox.checkState()
         # Looks like checkbox_state is 2 when checked, 0 when unchecked.
@@ -429,88 +1348,23 @@ class UPRLibWindow(QWidget):
     def addFractalName(fractal_upr, fractal_name):
         return fractal_name + " {\n" + fractal_upr + "\n}"
                 
-    @staticmethod
-    def getAllParents(index):
-        # print("\ngetAllParents starting..")
-        indices = []
-        nindex = index
-        
-        while nindex.isValid():
-            indices.append( nindex.row() )
-            nindex = nindex.parent()
-            #print("nindex parent is: " + str(nindex))
-            #print("nindex parent isValid: " + str(nindex.isValid()))
-            #print("nindex parent row: " + str(nindex.row()))
-        return list( reversed( indices ) )
-        
-    def getItemInfo(self, parent_indices):
-        # print("getItemInfo, parent indices: " +str(parent_indices))
-        
-        if not parent_indices:
-            return None
-        
-        anitem = None
-        final_pix = 0
-        for iqx,pix in enumerate(parent_indices) :
-            if iqx == 0:
-                anitem = self.model.item( pix )
-                if not anitem:
-                    # print("No root item: " + str(pix) + " from ")
-                    return None
-                final_pix = pix
-            else :
-                parent = anitem
-                # Double-safe? probably too much! :P
-                if anitem and pix < anitem.rowCount() :
-                    anitem = parent.child(pix)
-                    final_pix = pix
-
-        cols = self.getColumnsForItem( anitem, final_pix )
-
-        return cols
-    
-    def getColumnsForItem(self, anitem, pix):
-        item_parent = anitem.parent()
-        if not item_parent:
-            item_parent = self.model.invisibleRootItem()
-        columns = []
-        for col in range(item_parent.columnCount()):
-            columns.append(item_parent.child(pix, col).text())
-        return columns
-    
-    def getSelectedAllColumns(self):
-        all_columns = []
-        for index in self.tree.selectionModel().selectedRows():
-            if index.column() > 0 :
-                print("\nSkip data: " + str(index.data()))
-                print("Skipping nonzero column callback: " + str(index.column()) + "\n")
-                continue
-            parents = self.getAllParents(index)
-            found_item_cols = self.getItemInfo( parents )
-            all_columns.append( found_item_cols )
-
-        return all_columns
-
     def treeDoubleClicked(self, index):
         self.openImages()
 
     def openImages(self):
         print("Start of openImages")
         images = []
-        columns_each_row = self.getSelectedAllColumns()
+        entries = self.getActiveSelectionEntries()
         missing_images = []
-        
+
         open_progress = QProgressDialog()
         open_progress.setLabelText("Finding image files..")
-        open_progress.setRange(0,len(columns_each_row))
+        open_progress.setRange(0,len(entries))
         open_progress.setWindowModality(Qt.WindowModality.WindowModal)
         open_progress.setAutoClose(True)
         open_progress.forceShow() #exec_()
-        
-        if self.verbose:
-            print(self.data.keys())
 
-        for ixx,found_item_cols in enumerate(columns_each_row):
+        for ixx,entry in enumerate(entries):
             if self.verbose:
                 print(f"Iterating Row: {ixx}")
             open_progress.setValue( ixx+1 )
@@ -518,58 +1372,22 @@ class UPRLibWindow(QWidget):
             if open_progress.wasCanceled():
                 return
 
-            if self.verbose:
-                print(f"Looking for {found_item_cols[1]} in self.data")
-            for key, val in self.data.items():
-                if key.split(":")[1] == found_item_cols[1]:
-                    if self.verbose:
-                        print(f"FOUND MATCHING data key {key}")
-                        print(f"  {val=}")
+            image_path = entry.get('image_path')
+            if image_path:
+                images.append( image_path )
+                if self.verbose:
+                    print(f"  appended image {image_path}")
+            else:
+                missing_images.append( entry['upr_name'].split(":")[0] )
 
-                    if 'image_path' in val :
-                        images.append( val['image_path'] )
-                        if self.verbose:
-                            print(f"  appended image {val['image_path']}")
-
-                else:
-                    continue
-            
-            if False : # Old globbing aproach!
-                #print("\n")
-                #print("openImages got cols: " + str(found_item_cols))
-                config_image_root = self.upr_lib.config_dict.get('upr_image_root_dir')
-
-                if not config_image_root:
-                    return
-
-                #print("Got Image Root from config: " + str(config_image_root))
-                glob_for = found_item_cols[1] + ".tif"
-
-                #print("Globbing for: " + str( glob_for ))
-                #print(".. in dir " + str( config_image_root ))
-
-                globbed_image = glob.glob("**/" + glob_for, 
-                                          root_dir=config_image_root,
-                                          recursive=True)
-
-                if globbed_image:
-                    print("Found globbed image: " + str( globbed_image ))
-                    # Could be multiple matches I guess!? take first for now.
-                    image_fullpath = os.path.join( config_image_root, globbed_image[0] )
-                    print("Globbed image fullpath: " + str( image_fullpath ))
-                    images.append( image_fullpath )
-                else:
-                    print("No image found for: " + str( glob_for ))
-                    missing_images.append( found_item_cols[1] )
-        
         if not images :
-            self.displayMessage("No Images Found", 
+            self.displayMessage("No Images Found",
                                 "No images were found for any of the\nselected fractals I'm afraid!",
                                 None)
             return
-        
-        if len(images) < len(columns_each_row):
-            msg = "We only found images for " + str(len(images)) + " out of " + str(len(columns_each_row)) + " selected fractals!"
+
+        if len(images) < len(entries):
+            msg = "We only found images for " + str(len(images)) + " out of " + str(len(entries)) + " selected fractals!"
             
             msg_dtl = "Missing:\n  "
             msg_dtl += "\n  ".join(missing_images)
@@ -595,78 +1413,27 @@ class UPRLibWindow(QWidget):
         
     def copyToClipboard(self):
         print("Copy UPR Clicked!")
-        
-        # TODO: copy-to-clipboard
-        
-        #basesel = self.tree.model.selectedIndexes()
-        #for bs in basesel:
-        #    print("bs:" + str(bs))
-        
-        # print("\n".join(dir(self.tree)))
-        # print("\n".join(dir(self.model)))
-                
-        #for row in self.tree.selectionModel().selectedRows():
-        #    print("Row yo!: " + str(row))
-        #    print("Row text!: " + str(row.text()))
-        
-        #for index in self.tree.selectedIndexes():
-        for index in self.tree.selectionModel().selectedRows():
-        
-            if index.column() > 0 :
-                print("\nSkip data: " + str(index.data()))
-                print("Skipping nonzero column callback for copy: " + str(index.column()) + "\n")
-                continue
-                
-            print("\n" +
-                  "   selected row: " + str(index.row()))
-            print("         column: " + str(index.column()))
-            print("           data: " + str(index.data()))
-            print("     internalId: " + str(index.internalId()))
-            print("          flags: " + str(index.flags()))
-            print("           data: " + str(index.data()))
-            print("          model: " + str(index.model()))
-            print("      raw index: " + str(index))
-            
-            parents = self.getAllParents(index)
-            print("        parents: " + str(parents))
-            
-            #testitem = self.tree.model().itemFromIndex( index )
-            #print("Got testitem: " + str(testitem))
 
-            # Sounds like some kind of mapping is needed here?!
-            #source_index = self.model.mapToSource(index)
-            found_item_cols = self.getItemInfo( parents )
-            
-            print("found item cols: " + str(found_item_cols))
+        all_uprs_dict = self.upr_lib.getAllUPRs()
 
-            all_uprs_dict = self.upr_lib.getAllUPRs()
-            
-            # Eventually want to do this differently in case there are
-            # more than one file with the same filename in different paths
-            # but this is ok for the moment!
-            selected_upr_name = found_item_cols[1]
-            selected_filename = found_item_cols[2]
-            selected_index = int(found_item_cols[3])
-            upr_name_key = selected_upr_name + ":" + str(selected_index)
-            full_upr_path = getFullPathUsingFilename(selected_filename,all_uprs_dict.keys())
-            
-            if full_upr_path not in all_uprs_dict:
+        # If multiple are selected, you get the last one that was selected -
+        # same as the "Copy UPR to Clipboard" button's tooltip always promised.
+        for entry in self.getActiveSelectionEntries():
+            full_upr_path = entry['upr_file']
+            upr_name_key = entry['upr_name']
+
+            upr_data_dict = all_uprs_dict.get(full_upr_path)
+            if upr_data_dict is None:
                 print("ERROR: Upr file was not found in library! This is most odd! Bailing out.")
                 return
-                
-            print("Found upr file in UPR lib!")
-            
-            upr_data_dict = all_uprs_dict[full_upr_path]
-            
+
             if upr_name_key in upr_data_dict:
                 if self.verbose:
                     print("\nKey found!\n")
                 # This is a string.. the actual fractal code in plaintext UPR
                 upr_data = upr_data_dict[upr_name_key]
-                fractal_with_name = self.addFractalName(upr_data, selected_upr_name)
+                fractal_with_name = self.addFractalName(upr_data, upr_name_key.split(":")[0])
                 self.setClipboard( fractal_with_name )
-            
-            print( "\n" )
 
     def quitButtonClicked(self, by_hotkey=False):
         if self.verbose:
@@ -724,6 +1491,7 @@ class UPRLibWindow(QWidget):
 
             name_item = QtGui.QStandardItem( upr_name_no_ix )
             name_item.setData( upr_name_no_ix, Qt.ItemDataRole.UserRole )
+            name_item.setData( value, UPR_ENTRY_ROLE )
 
             file_item = QtGui.QStandardItem( upr_file_basename )
             file_item.setData( upr_file_basename, Qt.ItemDataRole.UserRole )
@@ -746,6 +1514,11 @@ class UPRLibWindow(QWidget):
                 size_item,
                 ])
             seen[ijx] = parent.child(parent.rowCount() - 1)
+
+        # ix -> tree item, so graph<->tree selection syncing can find a given
+        # entry's row without walking the whole model.
+        self.ix_to_tree_item = seen
+
         if self.verbose:
             print("setDataInTreeWidget finished.")
     
