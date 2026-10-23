@@ -7,6 +7,8 @@ import fnmatch
 import functools
 import time
 from collections import deque
+from collections import defaultdict
+from collections import Counter
 
 from PIL import Image
 
@@ -1758,6 +1760,37 @@ def rebuildParentingDataAsDict(data_val, shell_ui_enable=False, verbose=0) :
 
     return flat_kp
 
+def addRenderInfoToData(data, renders, verbose=False):
+    """Attaches each entry's renders (2k, 8k, 16k... see UPRLibrary.loadRenders)
+    as a list under 'renders', largest first, including render-log stats
+    where the image has a log."""
+    renders_by_name = defaultdict(list)
+    for render in renders:
+        renders_by_name[ render['fractal_name'] ].append(render)
+
+    name_counts = Counter( val['upr_name'].split(":")[0] for val in data.values() )
+    num_with_renders = 0
+    for val in data.values():
+        clean_upr_name = val['upr_name'].split(":")[0]
+        upr_file_basename = os.path.basename(val['upr_file'])
+        candidates = renders_by_name.get(clean_upr_name, [])
+        if name_counts[clean_upr_name] == 1:
+            # Logs often name a different .upr file than the one the fractal
+            # lives in now (e.g. ultraMeta.upr was renamed to
+            # ultraMeta_YET_ANOTHER.upr), so a unique name is enough.
+            matched = list(candidates)
+        else:
+            # Several files have a fractal of this name: only trust a render
+            # whose log says which file it came from.
+            matched = [ render for render in candidates if render['upr_file'] == upr_file_basename ]
+        if matched:
+            val['renders'] = sorted( matched, key=lambda render: -((render['width'] or 0) * (render['height'] or 0)) )
+            num_with_renders += 1
+
+    if verbose:
+        print("Renders found for " + str(num_with_renders) + " of " + str(len(data)) + " entries.")
+    return data
+
 def addImagePathsToData(data, verbose=False):
     config_dict = UPRLibrary(verbose=verbose).getConfigDict()
     if verbose:
@@ -2069,7 +2102,9 @@ if __name__ == "__main__":
                 print( f"    {ikey} : {ival}" )
     
     data = addImagePathsToData(data, verbose=args.verbose)
-    
+
+    data = addRenderInfoToData(data, upr_lib.loadRenders(), verbose=args.verbose)
+
     data = dict(sorted(list(data.items()) , key=lambda item: item[0]))
     
     if args.disable_gui:

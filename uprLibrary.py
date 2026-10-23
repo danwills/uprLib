@@ -8,6 +8,7 @@ import sqlite3
 import argparse
 import itertools
 import logspinner
+from renderIndex import RenderIndex
 
 def configLinesToDict(lines):
     retdict = {}
@@ -346,6 +347,32 @@ class UPRLibrary:
                 num_cached = sum(1 for upr_file in self.upr_files if upr_file.from_cache)
                 print("Loaded " + str(num_cached) + " of " + str(len(self.upr_files)) + " UPR files from cache.")
         # print( "\n".join( active_uprs ) )
+
+    def loadRenders(self):
+        """Indexes every image and render log under upr_image_root_glob
+        (see renderIndex.py) and returns the renders, each linked to the
+        fractal it was rendered from where that can be worked out."""
+        if 'upr_image_root_glob' not in self.config_dict:
+            return []
+        # Without the cache, index into a throwaway in-memory db instead.
+        index = RenderIndex(self.getCacheFilename() if self.use_cache else ":memory:",
+                            verbose=self.verbose)
+        if self.rebuild_cache:
+            index.clear()
+
+        spinner = logspinner.spinning_cursor() if self.shell_ui else None
+        logspinner.write_spinner(spinner, prefix="Indexing renders", percent=0.0)
+        counts = index.scan(self.config_dict['upr_image_root_glob'],
+                            self.config_dict.get('upr_image_extensions', 'tif').split(","))
+        logspinner.write_spinner(spinner, prefix="Indexing renders", percent=1.0)
+        logspinner.endSpinner(spinner)
+        if self.verbose:
+            print("Render index: " + str(counts['images']) + " images (" + str(counts['images_read']) + " read), "
+                  + str(counts['logs']) + " logs (" + str(counts['logs_read']) + " read).")
+
+        renders = index.getRenders()
+        index.close()
+        return renders
 
     # Dict of file-path to UprFile-dict at present!
     def getAllUPRs(self):
