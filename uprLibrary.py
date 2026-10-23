@@ -7,8 +7,10 @@ import glob
 import sqlite3
 import argparse
 import itertools
+import hashlib
 import logspinner
 from renderIndex import RenderIndex
+from zoomIndex import ZoomIndex
 
 def configLinesToDict(lines):
     retdict = {}
@@ -120,6 +122,7 @@ class UPRFile:
         # Stat before reading, so a file that changes mid-read just looks
         # stale next time rather than being cached as its newer self.
         file_stat = os.stat(self.path)
+        self.file_stat = file_stat
         cached = cache.load(self.path, file_stat) if cache else None
         if cached is not None:
             self.lines = None
@@ -347,6 +350,33 @@ class UPRLibrary:
                 num_cached = sum(1 for upr_file in self.upr_files if upr_file.from_cache)
                 print("Loaded " + str(num_cached) + " of " + str(len(self.upr_files)) + " UPR files from cache.")
         # print( "\n".join( active_uprs ) )
+
+    def getUprFingerprint(self):
+        """Identifies the set of loaded .upr files and their contents (by
+        mtime/size), plus the load limits - anything derived from all of them
+        at once, like the zoom index, is stale when this changes."""
+        parts = sorted( (upr_file.path, upr_file.file_stat.st_mtime_ns, upr_file.file_stat.st_size)
+                        for upr_file in self.upr_files )
+        parts.append( (self.num_upr_file_limit, self.num_upr_limit) )
+        return hashlib.sha1(repr(parts).encode()).hexdigest()
+
+    def loadZoomIndex(self):
+        """The zoom index saved for the currently loaded .upr files, or None
+        if it needs (re)building - see buildZoomIndex."""
+        if not self.use_cache or self.rebuild_cache:
+            return None
+        return ZoomIndex.load(self.getCacheFilename(), self.getUprFingerprint())
+
+    def buildZoomIndex(self):
+        """Builds the zoom index from scratch (slow - several seconds for a
+        big library) and saves it to the cache. Safe to call from a
+        background thread."""
+        zoom_index = ZoomIndex.build({ (path, upr_name): payload
+                                       for path, upr_dict in self.getAllUPRs().items()
+                                       for upr_name, payload in upr_dict.items() })
+        if self.use_cache:
+            zoom_index.save(self.getCacheFilename(), self.getUprFingerprint())
+        return zoom_index
 
     def loadRenders(self):
         """Indexes every image and render log under upr_image_root_glob
