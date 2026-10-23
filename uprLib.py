@@ -1456,11 +1456,16 @@ class UPRLibWindow(QWidget):
         values = deque(data_val.values())
         if self.verbose > 4:
             print("values: " + str(data_val))
-            
+
+        # Filtering can keep an entry while dropping its parent. Such entries
+        # go at the top level, since requeueing them to wait for a parent
+        # that will never arrive loops forever.
+        present_ix = { value['ix'] for value in data_val.values() }
+
         while values:
             value = values.popleft()
-            
-            if value['level'] == 0:
+
+            if value['level'] == 0 or value['parent_id'] not in present_ix:
                 parent = root
             else:
                 pid = value['parent_id']
