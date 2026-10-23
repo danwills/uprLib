@@ -1221,7 +1221,8 @@ class UPRLibWindow(QWidget):
             file_data = model.data(file_index)
             index_data = model.data(index_index)
             expanded = treeview.isExpanded(index)
-            print(f"Got expanded: {expanded}")
+            if self.verbose:
+                print(f"Got expanded: {expanded}")
             all_data[ (name_data, file_data, index_data) ] = expanded
             
             if model.hasChildren(index):
@@ -1245,14 +1246,15 @@ class UPRLibWindow(QWidget):
             #print(f"Made key_tuple: {key_tuple}")
             if key_tuple in previous_states:
                 stored_expanded_state = previous_states[key_tuple]
-                print(f"Got stored_expanded_state: {stored_expanded_state}")
+                if self.verbose:
+                    print(f"Got stored_expanded_state: {stored_expanded_state}")
                 if stored_expanded_state:
                     #print(f"Expanding index: {index}")
                     treeview.expand(index)
                 else:
                     #print(f"Collapsing index: {index}")
                     treeview.collapse(index)
-            else:
+            elif self.verbose:
                 print(f"did not find key_tuple in previous_states!: {key_tuple}")
             if model.hasChildren(index):
                 self.restoreExpandedStates(treeview, previous_states, parent_index=index)
