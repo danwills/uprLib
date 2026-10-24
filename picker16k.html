@@ -122,7 +122,7 @@
     <option value="file">File order</option><option value="name">Name</option>
     <option value="est-asc">16k time, fastest</option><option value="est-desc">16k time, slowest</option>
     <option value="layers">Most layers</option><option value="random">Random</option>
-    <option value="like">More like my yeses</option></select></label>
+    <option value="like">More like my yeses</option><option value="families">Families (formula + look)</option></select></label>
   <label>Similar by <select id="mode">
     <option value="overall">Overall</option><option value="colour">Colour</option>
     <option value="texture">Texture</option><option value="layout">Layout</option></select></label>
@@ -184,6 +184,7 @@ let focusIdx = -1;
 let selected = new Set();
 let anchor = null;           // {kind: 'similar'|'family', id, name, scores?}
 let likeScores = null;
+let familyRank = null;       // Map id -> position, for the Families sort (plus .mode)
 let randomKey = new Map();
 
 const store = {
@@ -238,6 +239,7 @@ function computeView() {
   else if (sort === "est-desc") list.sort((a, b) => (b.est16k_hours ?? -1) - (a.est16k_hours ?? -1));
   else if (sort === "layers") list.sort((a, b) => (b.layers ?? 0) - (a.layers ?? 0));
   else if (sort === "random") list.sort((a, b) => randomKey.get(a.id) - randomKey.get(b.id));
+  else if (sort === "families" && familyRank) list.sort((a, b) => (familyRank.get(a.id) ?? 1e9) - (familyRank.get(b.id) ?? 1e9));
   return list;
 }
 
@@ -371,7 +373,13 @@ function showFamily(e) {
 
 function clearAnchor() { anchor = null; $("banner").style.display = "none"; render(view[focusIdx]?.id); }
 
-async function refreshLike() {
+async function refreshSortScores() {
+  const mode = $("mode").value;
+  if ($("sort").value === "families" && familyRank?.mode !== mode) {
+    toast("Grouping families (a few seconds the first time)..");
+    const order = await (await fetch(`/api/families?mode=${mode}`)).json();
+    familyRank = new Map(order.map((id, i) => [id, i])); familyRank.mode = mode;
+  }
   if ($("sort").value !== "like") return;
   const res = await fetch(`/api/like-yeses?mode=${$("mode").value}`);
   likeScores = await res.json();
@@ -429,7 +437,7 @@ document.addEventListener("keydown", ev => {
   else if (k === "u") mark(null);
   else if (k === "s" && view[focusIdx]) { if (lb) closeLightbox(); showSimilar(view[focusIdx]); }
   else if (k === "f" && view[focusIdx]) { if (lb) closeLightbox(); showFamily(view[focusIdx]); }
-  else if (k === "r") { refreshLike().then(() => render(view[focusIdx]?.id)); }
+  else if (k === "r") { refreshSortScores().then(() => render(view[focusIdx]?.id)); }
   else if (k === "/") { $("q").focus(); }
   else if (k === "escape") { if (lb) closeLightbox(); else if ($("help").classList.contains("open")) $("help").classList.remove("open"); else if (anchor) clearAnchor(); else { selected.clear(); updateSelectionClasses(); } }
   else if (k === "enter" || k === " ") { lb ? closeLightbox() : openLightbox(); }
@@ -491,7 +499,7 @@ for (const id of ["show", "has16k", "imgs", "sort", "mode"]) {
     store.set(id, $(id).value);
     if (id === "sort" && $(id).value === "random") entries.forEach(e => randomKey.set(e.id, Math.random()));
     if (id === "mode" && anchor && anchor.kind === "similar") return showSimilar(byId.get(anchor.id));
-    await refreshLike();
+    await refreshSortScores();
     render(view[focusIdx]?.id);
   });
 }
@@ -504,7 +512,7 @@ let qTimer; $("q").addEventListener("input", () => { clearTimeout(qTimer); qTime
 (async () => {
   entries = await (await fetch("/api/entries")).json();
   entries.forEach(e => { byId.set(e.id, e); randomKey.set(e.id, Math.random()); });
-  await refreshLike();
+  await refreshSortScores();
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("q")) $("q").value = hash.get("q");
   if (hash.has("show")) $("show").value = hash.get("show");

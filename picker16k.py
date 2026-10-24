@@ -29,15 +29,17 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 import random
+import re
 import socket
 import sqlite3
 import sys
 import threading
 import time
 import urllib.parse
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 
@@ -64,6 +66,11 @@ SIMILARITY_MODES = {
     "texture": (0.15, 0.25, 1.0),
     "layout":  (0.2, 1.0, 0.2),
 }
+
+# The "Families" sort mixes formula similarity with visual similarity (the
+# visual half uses the page's "Similar by" mode). Both are z-scored first,
+# because their raw cosines sit on very different scales.
+FAMILY_FORMULA_WEIGHT = 0.5
 
 Image.MAX_IMAGE_PIXELS = 400_000_000
 
@@ -134,12 +141,94 @@ def _buildOne(task):
 
 # --- library data -----------------------------------------------------------
 
+# --- formula fingerprints -----------------------------------------------------
+
+param_rx = re.compile(r'\b([pf]_\w+)=(\S+)')
+
+def formulaTokens(payload):
+    """{token: weight} for the formulas an entry uses: each formula, both by
+    itself and by the section it's in (formula, inside, outside, transform..),
+    plus each of its parameter values at half weight. Pixel formulas are
+    skipped, as in zoomIndex."""
+    import zoomIndex
+    if '\\' in payload:
+        payload = zoomIndex.continuation_rx.sub('', payload)
+    tokens = {}
+    for section, body in zoomIndex._sections(payload):
+        flat = " ".join(body.split())
+        match = zoomIndex.formula_id_rx.search(flat)
+        if not match or zoomIndex.pixel_formula_rx.search(flat):
+            continue
+        formula = match.group(0)
+        tokens[f"{section}|{formula}"] = 1.0
+        tokens[f"any|{formula}"] = 1.0
+        for name, value in param_rx.findall(flat):
+            tokens.setdefault(f"{formula}|{name}={value}", 0.5)
+    return tokens
+
+
+def formulaSimilarity(token_dicts):
+    """N x N cosine similarity of tf-idf weighted formula tokens. Tokens in
+    one entry or in over half of them are dropped (no signal). Each entry has
+    only a few dozen tokens, so this goes row by row over just those, which is
+    much faster than a dense product with the reference BLAS."""
+    n = len(token_dicts)
+    df = Counter(t for d in token_dicts for t in d)
+    vocab = { t: j for j, t in enumerate(t for t, c in df.items() if 1 < c <= n // 2) }
+    rows = []
+    for d in token_dicts:
+        cols = [ (vocab[t], w * math.log(n / df[t])) for t, w in d.items() if t in vocab ]
+        js = np.array([ j for j, _ in cols ], dtype=np.int64)
+        ws = np.array([ w for _, w in cols ], dtype=np.float32)
+        norm = float(np.linalg.norm(ws))
+        rows.append((js, ws / norm if norm > 0 else ws))
+    by_token = np.zeros((len(vocab), n), dtype=np.float32)
+    for i, (js, ws) in enumerate(rows):
+        by_token[js, i] = ws
+    sim = np.zeros((n, n), dtype=np.float32)
+    for i, (js, ws) in enumerate(rows):
+        if len(js):
+            sim[i] = ws @ by_token[js]
+    return sim
+
+
+def zscore(sim):
+    """Standardises a similarity matrix over its off-diagonal values."""
+    n = len(sim)
+    diag = np.diag(sim).astype(np.float64)
+    count = n * n - n
+    mean = (float(sim.sum(dtype=np.float64)) - diag.sum()) / count
+    var = (float(np.square(sim, dtype=np.float64).sum()) - np.square(diag).sum()) / count - mean * mean
+    return (sim - np.float32(mean)) / np.float32(math.sqrt(max(var, 1e-12)))
+
+
+def nearestNeighbourPath(sim):
+    """An order where neighbours are similar: a greedy path that starts at
+    entry 0 and keeps adding whichever unvisited entry is most similar to
+    either end."""
+    n = len(sim)
+    if not n:
+        return []
+    free = np.ones(n, dtype=bool)
+    free[0] = False
+    head, tail = [0], []   # path = reversed(tail) + head
+    while free.any():
+        a_scores = np.where(free, sim[head[-1]], -np.inf)
+        b_scores = np.where(free, sim[tail[-1] if tail else 0], -np.inf)
+        a, b = int(a_scores.argmax()), int(b_scores.argmax())
+        nxt, side = (a, head) if a_scores[a] >= b_scores[b] else (b, tail)
+        side.append(nxt)
+        free[nxt] = False
+    return tail[::-1] + head
+
+
 def loadEntries():
     from uprLibrary import UPRLibrary
     from uprLib import loadLibraryData
     from zoomView import imagePathForEntry
     upr_lib = UPRLibrary(shell_ui=False)
     data = loadLibraryData(upr_lib)
+    payloads = upr_lib.getAllUPRs()
     by_ix = { val['ix']: val for val in data.values() }
 
     entries = []
@@ -167,6 +256,7 @@ def loadEntries():
                            "finished": r.get('finished'), "path": r['path'] }
                          for r in renders ],
             "est16k_hours": estimate16kHours(renders),
+            "formula_tokens": formulaTokens(payloads.get(val['upr_file'], {}).get(val['upr_name'], "")),
         })
     return upr_lib, entries
 
@@ -299,6 +389,9 @@ class Picker:
         self.blocks, self.mask = features.matrix(entries)
         self.full_cache = OrderedDict()
         self.full_lock = threading.Lock()
+        self.family_orders = {}    # mode -> [entry ids]
+        self.formula_z = None
+        self.family_lock = threading.Lock()
 
     def combined(self, mode):
         w = SIMILARITY_MODES.get(mode, SIMILARITY_MODES["overall"])
@@ -326,6 +419,26 @@ class Picker:
         score[~self.mask] = -2
         return { e['id']: round(float(s), 4) for e, s in zip(self.entries, score) }
 
+    def familyOrder(self, mode):
+        """Entry ids ordered so that similar entries (by formula and look) sit
+        together. Takes a few seconds the first time for each mode."""
+        mode = mode if mode in SIMILARITY_MODES else "overall"
+        with self.family_lock:
+            if mode not in self.family_orders:
+                if self.formula_z is None:
+                    self.formula_z = zscore(formulaSimilarity([ e['formula_tokens'] for e in self.entries ]))
+                m = self.combined(mode)[self.mask]
+                m = m / (np.linalg.norm(m, axis=1, keepdims=True) + 1e-9)
+                visual_z = zscore(m @ m.T)
+                # Entries without an image only have the formula half.
+                sim = self.formula_z.copy()
+                rows = np.flatnonzero(self.mask)
+                sim[np.ix_(rows, rows)] = FAMILY_FORMULA_WEIGHT * sim[np.ix_(rows, rows)] + (1 - FAMILY_FORMULA_WEIGHT) * visual_z
+                del visual_z
+                np.fill_diagonal(sim, -np.inf)
+                self.family_orders[mode] = [ self.entries[i]['id'] for i in nearestNeighbourPath(sim) ]
+            return self.family_orders[mode]
+
     def fullImage(self, entry):
         path = entry['image']
         with self.full_lock:
@@ -345,7 +458,7 @@ class Picker:
         return data
 
     def publicEntries(self):
-        return [ { k: v for k, v in e.items() if k not in ("image", "key") } | { "has_preview": bool(e.get('key') and self.mask[self.row_of[e['id']]]) }
+        return [ { k: v for k, v in e.items() if k not in ("image", "key", "formula_tokens") } | { "has_preview": bool(e.get('key') and self.mask[self.row_of[e['id']]]) }
                  for e in self.entries ]
 
     def exportTsv(self, status):
@@ -395,6 +508,8 @@ def makeHandler(picker):
                 if entry is None:
                     return self.send({"error": "no such entry"}, status=404)
                 return self.send(picker.similar(entry['id'], query.get("mode", ["overall"])[0]))
+            if path == "/api/families":
+                return self.send(picker.familyOrder(query.get("mode", ["overall"])[0]))
             if path == "/api/like-yeses":
                 return self.send(picker.likeYeses(query.get("mode", ["overall"])[0]))
             if path.startswith("/export/") and path.endswith(".tsv"):
