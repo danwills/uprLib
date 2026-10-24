@@ -163,7 +163,7 @@
     <tr><td><kbd>←↑→↓</kbd></td><td>Move</td></tr>
     <tr><td><kbd>Y</kbd> <kbd>M</kbd> <kbd>N</kbd></td><td>Mark yes / maybe / no, then move on</td></tr>
     <tr><td><kbd>U</kbd></td><td>Clear the mark</td></tr>
-    <tr><td>Card buttons</td><td>Mark that card without moving (tap a lit one to clear it)</td></tr>
+    <tr><td>Card buttons</td><td>Mark that card and scroll on to the next (tap a lit one to clear it)</td></tr>
     <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Big view</td></tr>
     <tr><td><kbd>S</kbd></td><td>Sort by similarity to this one</td></tr>
     <tr><td><kbd>F</kbd></td><td>Show its family (same name root)</td></tr>
@@ -202,10 +202,13 @@ function fmtHours(h) {
   if (h < 48) return h.toFixed(h < 10 ? 1 : 0) + "h";
   return (h / 24).toFixed(1) + "d";
 }
-// Names share long prefixes, so when one won't fit in two lines, show its end.
+// When a name won't fit in two lines, cut out its middle: keep the start, and a bit more of the end
+// (which is where siblings differ).
 function shortName(name) {
   const fit = Math.floor(+$("size").value / 7.4) * 2 - 1;
-  return name.length > fit ? "…" + name.slice(-(fit - 1)) : name;
+  if (name.length <= fit) return name;
+  const head = Math.floor((fit - 1) * 0.4);
+  return name.slice(0, head) + "…" + name.slice(-(fit - 1 - head));
 }
 function renderLabel(px) { return px >= SIZE_16K ? "16k" : px >= 8000 ? "8k" : px >= 4000 ? "4k" : px ? Math.round(px / 1024) + "k" : ""; }
 
@@ -321,7 +324,7 @@ function updateCounts() {
   $("lbProgress").innerHTML = text + `<div class="progress">${bar}</div>`;
 }
 
-// With onlyId (a card's own buttons), marks just that card and stays put.
+// With onlyId (a card's own buttons), marks just that card, then scrolls on to the card after it.
 async function mark(status, onlyId = null) {
   const targets = onlyId != null ? [onlyId] : selected.size > 1 ? [...selected] : (view[focusIdx] ? [view[focusIdx].id] : []);
   if (!targets.length) return;
@@ -333,7 +336,14 @@ async function mark(status, onlyId = null) {
   if (likeScores && $("sort").value === "like") likeScores = null;   // stale; recomputed on refresh
   updateCounts();
   if (targets.length > 1) { toast(`Marked ${targets.length} as ${status || "unmarked"}`); selected.clear(); updateSelectionClasses(); }
-  else if (status && onlyId == null) {
+  else if (status && onlyId != null) {
+    const idx = view.findIndex(e => e.id === onlyId);
+    if (idx >= 0 && idx + 1 < view.length) {
+      setFocus(idx + 1, false);
+      cardEl(idx + 1).scrollIntoView({ block: columns() === 1 ? "start" : "nearest", behavior: "smooth" });
+    }
+  }
+  else if (status) {
     // Move straight on to the next decision, in the big view too.
     if ($("lb").classList.contains("open")) { saveNote(); toast(`${status[0].toUpperCase() + status.slice(1)} ✓  next one`); }
     setFocus(focusIdx + 1);
