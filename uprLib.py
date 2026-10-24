@@ -12,6 +12,12 @@ from collections import Counter
 
 from PIL import Image
 
+# numpy's BLAS goes through FlexiBLAS, whose OpenBLAS backend reserves 32GB
+# per process. That all counts under strict overcommit. The reference (NETLIB)
+# backend needs ~30MB, and nothing here uses BLAS anyway: the graph layout is
+# element-wise array maths. It must be set before numpy loads.
+os.environ.setdefault("FLEXIBLAS", "NETLIB")
+
 try:
     import numpy as np
     HAS_NUMPY = True
@@ -2086,7 +2092,68 @@ def addImagePathsToData(data, verbose=False):
     #print("\n")
     
     return data
-    
+
+def loadLibraryData(upr_lib, shell_ui=False, verbose=0):
+    """The full load pipeline (parse -> parent tree -> images -> renders),
+    returning the flat data dict the window shows. Shared with picker16k.py."""
+    # Move this into a button-press!
+    all_upr = upr_lib.loadAllUpr()
+    # curr_upr = upr_lib.getCurrentUpr()
+    # print("Current UPR: " + curr_upr)
+    # upr_file = UPRFile(curr_upr)
+    # print("This UPR file has: " + str(len(upr_file.lines)) + " lines.")
+    upr_dict = upr_lib.getAllUPRs()
+    upr_meta_dict = upr_lib.getAllUPRMeta()
+    # upr_file.getUprDict()
+    upr_dict_keys = upr_dict.keys()
+
+    if verbose:
+        print( "Found " + str( len( upr_dict_keys ) )  + " upr files.")
+
+    raw_data = []
+    totalix = 0
+
+
+    spinner = logspinner.spinning_cursor() if shell_ui else None
+
+    for uix, upr_file in enumerate( sorted( upr_dict_keys ) ):
+        for ix, uprname in enumerate( upr_dict[ upr_file ].keys() ):
+            uprname_clean = uprname.split(":")[0]
+            upr_meta = upr_meta_dict.get(upr_file, {}).get(uprname, {})
+            raw_data.append( { 'level':0,
+                           'dbid':totalix,
+                           'uprid':str(uix)+":"+str(ix),
+                           'parent_id':-1,
+                           'upr_name': uprname,
+                           'upr_file': upr_file,
+                           'num_layers': upr_meta.get('num_layers'),
+                           'compressed_size': upr_meta.get('compressed_size') } )
+            totalix += 1
+
+    if verbose:
+        print("Raw data had " + str( len( raw_data ) )  + " entries..")
+
+    # Note, this method also /flattens/ the data to a single dict where
+    # previously it was a list of dicts!
+
+    data = rebuildParentingDataAsDict(raw_data, shell_ui_enable=shell_ui, verbose=verbose)
+
+    if verbose:
+        print("rebuildParentingDataAsDict returned " + str( len( data ) )  + " entries..")
+
+    if verbose:
+        print("\n")
+        for key, val in data.items():
+            print( f"{key}" )
+            for ikey, ival in val.items() :
+                print( f"    {ikey} : {ival}" )
+
+    data = addImagePathsToData(data, verbose=verbose)
+
+    data = addRenderInfoToData(data, upr_lib.loadRenders(), verbose=verbose)
+
+    return dict(sorted(list(data.items()) , key=lambda item: item[0]))
+
 if __name__ == "__main__":
     # TODO get some options here!
     # verbose
@@ -2205,64 +2272,8 @@ if __name__ == "__main__":
                           rebuild_cache=args.rebuild_cache,
                           verbose=args.verbose )
     
-    # Move this into a button-press!
-    all_upr = upr_lib.loadAllUpr()
-    # curr_upr = upr_lib.getCurrentUpr()
-    # print("Current UPR: " + curr_upr)
-    # upr_file = UPRFile(curr_upr)
-    # print("This UPR file has: " + str(len(upr_file.lines)) + " lines.")
-    upr_dict = upr_lib.getAllUPRs()
-    upr_meta_dict = upr_lib.getAllUPRMeta()
-    # upr_file.getUprDict()
-    upr_dict_keys = upr_dict.keys()
+    data = loadLibraryData(upr_lib, shell_ui=shell_ui, verbose=args.verbose)
 
-    if args.verbose:
-        print( "Found " + str( len( upr_dict_keys ) )  + " upr files.")
-        
-    raw_data = []
-    totalix = 0
-    
-    
-    spinner = logspinner.spinning_cursor() if shell_ui else None
-    
-    for uix, upr_file in enumerate( sorted( upr_dict_keys ) ):
-        for ix, uprname in enumerate( upr_dict[ upr_file ].keys() ):
-            uprname_clean = uprname.split(":")[0]
-            upr_meta = upr_meta_dict.get(upr_file, {}).get(uprname, {})
-            raw_data.append( { 'level':0,
-                           'dbid':totalix,
-                           'uprid':str(uix)+":"+str(ix),
-                           'parent_id':-1,
-                           'upr_name': uprname,
-                           'upr_file': upr_file,
-                           'num_layers': upr_meta.get('num_layers'),
-                           'compressed_size': upr_meta.get('compressed_size') } )
-            totalix += 1
-            
-    if args.verbose:
-        print("Raw data had " + str( len( raw_data ) )  + " entries..")
-    
-    # Note, this method also /flattens/ the data to a single dict where
-    # previously it was a list of dicts!
-    
-    data = rebuildParentingDataAsDict(raw_data, shell_ui_enable=shell_ui, verbose=args.verbose)
-    
-    if args.verbose:
-        print("rebuildParentingDataAsDict returned " + str( len( data ) )  + " entries..")
-    
-    if args.verbose:
-        print("\n")
-        for key, val in data.items():
-            print( f"{key}" )
-            for ikey, ival in val.items() :
-                print( f"    {ikey} : {ival}" )
-    
-    data = addImagePathsToData(data, verbose=args.verbose)
-
-    data = addRenderInfoToData(data, upr_lib.loadRenders(), verbose=args.verbose)
-
-    data = dict(sorted(list(data.items()) , key=lambda item: item[0]))
-    
     if args.disable_gui:
         if args.verbose:
             print("\nDisable GUI arg specified, bailing out instead of showing the UI!\n")
