@@ -83,6 +83,13 @@ Config values are copied onto matching attribute names on `UPRLibrary` via `conf
   - Selection is synced both ways between the tree and the graph (`onTreeSelectionChanged`/`onGraphSelectionChanged`, keyed by `ix`). A `_syncing_selection` flag prevents the two handlers from triggering each other in a loop. The tree's context-menu `QAction`s are shared with the graph view.
 - The `__main__` block wires CLI args to `UPRLibrary`, runs the full pipeline (load → `rebuildParentingDataAsDict` → `addImagePathsToData` → `addRenderInfoToData` → sort), applies a dark `QPalette` (the `dark.qss` stylesheet file exists but is currently not loaded — see the commented-out block), and shows the window.
 
+**`picker16k.py` + `picker16k.html`** — the 16k picker, a local web page (`python3 picker16k.py`, then http://localhost:8016) for triaging which entries deserve a 16k render:
+- It loads the library through `uprLib.loadLibraryData` (the same pipeline as the GUI's `__main__`), so it imports `uprLib.py` and `zoomView.py`. Importing PyQt6 is fine; it never creates a `QApplication`.
+- Its cache is `uprLibrary.picker/`: 512px JPEG previews, plus a `features.sqlite` of hand-made fingerprints (colour / layout / texture blocks, see `computeFeatures`). Entries are keyed by image path + mtime + size + `FEATURE_VERSION`, so bump that when the fingerprint changes. There's no ML model because torch isn't installed and the GTX 960 is too old for it. Similarity is cosine over the blocks, weighted per mode (`SIMILARITY_MODES`).
+- Building the cache uses threads, not processes, because forking fails under this machine's strict overcommit (ENOMEM). The first build is disk-bound at ~1 image/s.
+- Picks (yes/maybe/no + note) live in `uprLibrary.picks.sqlite`, keyed by (upr file basename, name, index) and re-found by name if the index moves. They're the user's work, so never put them in a cache file that might be rebuilt. Both files are gitignored.
+- The estimated 16k time scales the biggest finished, logged render by pixel count. The page's "Export yes" gives a TSV with `fractal`/`upr_file`/`index` columns, which the desktop-automation skill's `uprlib_jobs.py` accepts.
+
 **Other files:**
 - `uprLib.PYQT5_py` is an older variant/backup of `uprLib.py` (fewer features, e.g. no icon/thumbnail column). It is not imported or run by anything — treat `uprLib.py` as the source of truth and don't duplicate changes into this file unless asked.
 - `logspinner.py` is a tiny standalone CLI progress-spinner helper used throughout the loading pipeline for shell feedback; has no Qt dependency.

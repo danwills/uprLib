@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16k Picker</title>
+<style>
+  :root {
+    --bg: #141416; --panel: #1d1e22; --panel2: #26272c; --line: #34353b;
+    --text: #e6e6e9; --dim: #9a9ba3; --accent: #5aa0ff;
+    --yes: #3fbf6a; --maybe: #e0a83a; --no: #d9534f;
+    --card: 200px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+               font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel);
+           border-bottom: 1px solid var(--line); padding: 8px 12px;
+           display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+  header h1 { font-size: 15px; margin: 0 6px 0 0; white-space: nowrap; }
+  header label { color: var(--dim); display: flex; gap: 5px; align-items: center; }
+  select, input, button, textarea {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 5px; padding: 4px 7px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  input[type=search] { width: 220px; }
+  .counts { margin-left: auto; color: var(--dim); white-space: nowrap; }
+  .counts b { color: var(--text); font-weight: 600; }
+  .c-yes { color: var(--yes) !important; } .c-maybe { color: var(--maybe) !important; } .c-no { color: var(--no) !important; }
+  #banner { display: none; padding: 7px 12px; background: #1f2a3a; border-bottom: 1px solid var(--line); }
+  #banner button { margin-left: 8px; }
+  #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(var(--card), 1fr));
+          gap: 10px; padding: 12px; }
+  .card { background: var(--panel); border: 2px solid transparent; border-radius: 7px;
+          overflow: hidden; cursor: pointer; position: relative; content-visibility: auto;
+          contain-intrinsic-size: auto calc(var(--card) + 52px); }
+  .card .img { aspect-ratio: 1; background: #0b0b0c center / contain no-repeat; display: block; width: 100%;
+               object-fit: contain; }
+  .card .noimg { aspect-ratio: 1; display: flex; align-items: center; justify-content: center; color: var(--dim);
+                 font-size: 12px; background: repeating-linear-gradient(45deg, #18181b 0 8px, #1c1c20 8px 16px); }
+  .card .meta { padding: 5px 7px 6px; }
+  .card .name { font-size: 12px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical; word-break: break-all; }
+  .card .sub { color: var(--dim); font-size: 11px; margin-top: 2px; display: flex; gap: 8px; }
+  .card.focus { border-color: var(--accent); }
+  .card.sel { box-shadow: 0 0 0 3px #5aa0ff55 inset; background: #1f2633; }
+  .card.s-yes { border-color: var(--yes); } .card.s-maybe { border-color: var(--maybe); } .card.s-no { border-color: var(--no); }
+  .card.s-no .img { opacity: .45; }
+  .card.focus.s-yes, .card.focus.s-maybe, .card.focus.s-no { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .badge { position: absolute; top: 6px; left: 6px; padding: 1px 7px; border-radius: 9px; font-size: 11px;
+           font-weight: 700; color: #111; }
+  .badge.yes { background: var(--yes); } .badge.maybe { background: var(--maybe); } .badge.no { background: var(--no); }
+  .score { position: absolute; top: 6px; right: 6px; padding: 1px 6px; border-radius: 9px; font-size: 11px;
+           background: #000a; color: var(--text); }
+  #empty { display: none; padding: 40px; text-align: center; color: var(--dim); }
+  /* lightbox */
+  #lb { position: fixed; inset: 0; background: #000e; z-index: 20; display: none; }
+  #lb.open { display: grid; grid-template-columns: 1fr 340px; }
+  #lb .view { display: flex; align-items: center; justify-content: center; min-width: 0; min-height: 0; padding: 12px; }
+  #lb .view img { max-width: 100%; max-height: calc(100vh - 24px); object-fit: contain; }
+  #lb aside { background: var(--panel); border-left: 1px solid var(--line); padding: 14px; overflow: auto; }
+  #lb h2 { font-size: 14px; margin: 0 0 6px; word-break: break-all; }
+  #lb dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 10px 0; color: var(--dim); }
+  #lb dd { margin: 0; color: var(--text); word-break: break-all; }
+  #lb .marks { display: flex; gap: 6px; margin: 0 0 12px; }
+  .progress { height: 6px; border-radius: 3px; background: var(--panel2); overflow: hidden; display: flex; }
+  .progress span { height: 100%; }
+  .progress .p-yes { background: var(--yes); } .progress .p-maybe { background: var(--maybe); } .progress .p-no { background: var(--no); }
+  #progressBar { position: sticky; top: 0; }
+  #lbProgress { margin: 0 0 12px; color: var(--dim); font-size: 12px; white-space: nowrap; }
+  #lbProgress .progress { margin-top: 5px; }
+  #lb .marks button { flex: 1; padding: 7px 0; font-weight: 600; }
+  #lb .marks button.on.yes { background: var(--yes); color: #111; }
+  #lb .marks button.on.maybe { background: var(--maybe); color: #111; }
+  #lb .marks button.on.no { background: var(--no); color: #111; }
+  #lb textarea { width: 100%; min-height: 70px; resize: vertical; }
+  #lb .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  #lb .hint { color: var(--dim); font-size: 11px; margin-top: 14px; }
+  #help { position: fixed; right: 14px; top: 60px; z-index: 30; background: var(--panel); border: 1px solid var(--line);
+          border-radius: 8px; padding: 12px 16px; display: none; max-width: 380px; box-shadow: 0 8px 30px #000a; }
+  #help.open { display: block; }
+  #help table { border-collapse: collapse; } #help td { padding: 2px 8px 2px 0; vertical-align: top; }
+  kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font: 11px monospace; }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--panel2);
+           border: 1px solid var(--line); border-radius: 6px; padding: 7px 14px; display: none; z-index: 40; }
+  @media (max-width: 800px) { #lb.open { grid-template-columns: 1fr; grid-template-rows: 60vh auto; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>16k Picker</h1>
+  <input type="search" id="q" placeholder="Filter names (space = and, -word = not)">
+  <label>Show <select id="show">
+    <option value="todo">Unreviewed</option><option value="yes">Yes</option><option value="maybe">Maybe</option>
+    <option value="no">No</option><option value="reviewed">Reviewed</option><option value="all">All</option></select></label>
+  <label>16k <select id="has16k">
+    <option value="without">Without a 16k</option><option value="with">With a 16k</option><option value="all">Any</option></select></label>
+  <label>Images <select id="imgs">
+    <option value="with">With an image</option><option value="without">Without</option><option value="all">Any</option></select></label>
+  <label>Sort <select id="sort">
+    <option value="file">File order</option><option value="name">Name</option>
+    <option value="est-asc">16k time, fastest</option><option value="est-desc">16k time, slowest</option>
+    <option value="layers">Most layers</option><option value="random">Random</option>
+    <option value="like">More like my yeses</option></select></label>
+  <label>Similar by <select id="mode">
+    <option value="overall">Overall</option><option value="colour">Colour</option>
+    <option value="texture">Texture</option><option value="layout">Layout</option></select></label>
+  <label>Size <input type="range" id="size" min="120" max="420" value="200"></label>
+  <button id="export" title="Download the yes list as a TSV">Export yes</button>
+  <button id="helpBtn">?</button>
+  <span class="counts" id="counts"></span>
+</header>
+<div class="progress" id="progressBar" title=""></div>
+<div id="banner"><span id="bannerText"></span><button id="bannerClear">Clear</button></div>
+<main id="grid"></main>
+<div id="empty">Nothing matches.</div>
+
+<div id="lb">
+  <div class="view"><img id="lbImg" alt=""></div>
+  <aside>
+    <div id="lbProgress"></div>
+    <!-- Buttons first, so they stay put however long the name is. -->
+    <div class="marks">
+      <button class="yes" data-s="yes">Yes <kbd>Y</kbd></button>
+      <button class="maybe" data-s="maybe">Maybe <kbd>M</kbd></button>
+      <button class="no" data-s="no">No <kbd>N</kbd></button>
+    </div>
+    <h2 id="lbName"></h2>
+    <textarea id="lbNote" placeholder="Note (saved when you leave the box)"></textarea>
+    <dl id="lbInfo"></dl>
+    <div class="row">
+      <button id="lbSimilar">Similar <kbd>S</kbd></button>
+      <button id="lbFamily">Family <kbd>F</kbd></button>
+      <button id="lbClose">Close <kbd>Esc</kbd></button>
+    </div>
+    <div class="hint">Marking moves on to the next one. <kbd>←</kbd> <kbd>→</kbd> previous / next in the list. <kbd>U</kbd> clears the mark.</div>
+  </aside>
+</div>
+
+<div id="help">
+  <table>
+    <tr><td><kbd>←↑→↓</kbd></td><td>Move</td></tr>
+    <tr><td><kbd>Y</kbd> <kbd>M</kbd> <kbd>N</kbd></td><td>Mark yes / maybe / no, then move on</td></tr>
+    <tr><td><kbd>U</kbd></td><td>Clear the mark</td></tr>
+    <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Big view</td></tr>
+    <tr><td><kbd>S</kbd></td><td>Sort by similarity to this one</td></tr>
+    <tr><td><kbd>F</kbd></td><td>Show its family (same name root)</td></tr>
+    <tr><td><kbd>R</kbd></td><td>Refresh the list (marked cards stay put until you do)</td></tr>
+    <tr><td>Shift / Ctrl click</td><td>Select several; marks then apply to all of them</td></tr>
+    <tr><td><kbd>/</kbd></td><td>Filter box</td></tr>
+  </table>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const SIZE_16K = 16384;
+let entries = [], byId = new Map();
+let view = [];               // entries currently shown, in order
+let focusIdx = -1;
+let selected = new Set();
+let anchor = null;           // {kind: 'similar'|'family', id, name, scores?}
+let likeScores = null;
+let randomKey = new Map();
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("picker16k." + k); return v === null ? d : v; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("picker16k." + k, v); } catch {} },
+};
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = "none", 2200);
+}
+
+function fmtHours(h) {
+  if (h == null) return "";
+  if (h < 1) return Math.round(h * 60) + "m";
+  if (h < 48) return h.toFixed(h < 10 ? 1 : 0) + "h";
+  return (h / 24).toFixed(1) + "d";
+}
+// Names share long prefixes, so when one won't fit in two lines, show its end.
+function shortName(name) {
+  const fit = Math.floor(+$("size").value / 7.4) * 2 - 1;
+  return name.length > fit ? "…" + name.slice(-(fit - 1)) : name;
+}
+function renderLabel(px) { return px >= SIZE_16K ? "16k" : px >= 8000 ? "8k" : px >= 4000 ? "4k" : px ? Math.round(px / 1024) + "k" : ""; }
+
+function matchesQuery(e, terms) {
+  const n = e.name.toLowerCase(), f = e.file.toLowerCase();
+  return terms.every(t => t.startsWith("-") && t.length > 1 ? !(n.includes(t.slice(1)) || f.includes(t.slice(1)))
+                                                            : n.includes(t) || f.includes(t));
+}
+
+function computeView() {
+  const terms = $("q").value.toLowerCase().split(/\s+/).filter(Boolean);
+  const show = $("show").value, has16k = $("has16k").value, imgs = $("imgs").value;
+  let list = entries.filter(e => {
+    if (anchor && anchor.kind === "family" && e.root !== anchor.root) return false;
+    if (show === "todo" ? e.status : show === "reviewed" ? !e.status : show !== "all" && e.status !== show) return false;
+    const big = e.largest >= SIZE_16K;
+    if (has16k === "without" && big || has16k === "with" && !big) return false;
+    if (imgs === "with" && !e.has_preview || imgs === "without" && e.has_preview) return false;
+    return !terms.length || matchesQuery(e, terms);
+  });
+  const sort = $("sort").value;
+  const scoreOf = anchor && anchor.kind === "similar" ? anchor.scores : sort === "like" ? likeScores : null;
+  if (scoreOf) {
+    list.sort((a, b) => (scoreOf[b.id] ?? -9) - (scoreOf[a.id] ?? -9));
+  } else if (sort === "name") list.sort((a, b) => a.name.localeCompare(b.name));
+  else if (sort === "est-asc") list.sort((a, b) => (a.est16k_hours ?? 1e9) - (b.est16k_hours ?? 1e9));
+  else if (sort === "est-desc") list.sort((a, b) => (b.est16k_hours ?? -1) - (a.est16k_hours ?? -1));
+  else if (sort === "layers") list.sort((a, b) => (b.layers ?? 0) - (a.layers ?? 0));
+  else if (sort === "random") list.sort((a, b) => randomKey.get(a.id) - randomKey.get(b.id));
+  return list;
+}
+
+function cardHtml(e, score) {
+  const st = e.status ? ` s-${e.status}` : "";
+  const img = e.has_preview ? `<img class="img" loading="lazy" src="/preview/${e.id}.jpg" alt="">`
+                            : `<div class="noimg">no image</div>`;
+  const badge = e.status ? `<span class="badge ${e.status}">${e.status}</span>` : "";
+  const sc = score != null ? `<span class="score">${score.toFixed(2)}</span>` : "";
+  const est = e.est16k_hours != null ? `<span title="estimated 16k render time">~${fmtHours(e.est16k_hours)}</span>` : "";
+  const big = e.largest ? `<span title="largest render">${renderLabel(e.largest)}</span>` : "";
+  return `<div class="card${st}" data-id="${e.id}">${img}${badge}${sc}<div class="meta">
+    <div class="name" title="${e.name} (${e.file} #${e.index})">${shortName(e.name)}</div>
+    <div class="sub">${est}${big}<span>${e.layers ?? "?"}L</span></div></div></div>`;
+}
+
+function render(keepFocusId) {
+  view = computeView();
+  const scoreOf = anchor && anchor.kind === "similar" ? anchor.scores : $("sort").value === "like" ? likeScores : null;
+  $("grid").innerHTML = view.map(e => cardHtml(e, scoreOf ? scoreOf[e.id] : null)).join("");
+  $("empty").style.display = view.length ? "none" : "block";
+  selected = new Set([...selected].filter(id => view.some(e => e.id === id)));
+  let idx = keepFocusId != null ? view.findIndex(e => e.id === keepFocusId) : -1;
+  setFocus(idx >= 0 ? idx : (view.length ? 0 : -1), idx >= 0);
+  updateSelectionClasses();
+  updateCounts();
+}
+
+function cardEl(idx) { return idx >= 0 ? $("grid").children[idx] : null; }
+
+function setFocus(idx, scroll = true) {
+  cardEl(focusIdx)?.classList.remove("focus");
+  focusIdx = Math.max(-1, Math.min(idx, view.length - 1));
+  const el = cardEl(focusIdx);
+  if (el) { el.classList.add("focus"); if (scroll) el.scrollIntoView({ block: "nearest" }); }
+}
+
+function updateSelectionClasses() {
+  [...$("grid").children].forEach(el => el.classList.toggle("sel", selected.has(+el.dataset.id)));
+}
+
+function updateCard(e) {
+  const idx = view.indexOf(e);
+  const el = cardEl(idx);
+  if (!el) return;
+  const scoreOf = anchor && anchor.kind === "similar" ? anchor.scores : $("sort").value === "like" ? likeScores : null;
+  const tmp = document.createElement("div");
+  tmp.innerHTML = cardHtml(e, scoreOf ? scoreOf[e.id] : null);
+  const fresh = tmp.firstElementChild;
+  // keep the loaded image element so it doesn't flicker
+  const oldImg = el.querySelector("img"); const newImg = fresh.querySelector("img");
+  if (oldImg && newImg) newImg.replaceWith(oldImg);
+  fresh.classList.toggle("focus", idx === focusIdx);
+  fresh.classList.toggle("sel", selected.has(e.id));
+  el.replaceWith(fresh);
+}
+
+function updateCounts() {
+  const c = { yes: 0, maybe: 0, no: 0 }; let yesHours = 0, unknown = 0, todo = 0;
+  for (const e of entries) {
+    if (e.status) c[e.status]++;
+    else if (e.largest < SIZE_16K) todo++;
+    if (e.status === "yes") { if (e.est16k_hours != null) yesHours += e.est16k_hours; else unknown++; }
+  }
+  const est = c.yes ? ` (~${fmtHours(yesHours)}${unknown ? `, ${unknown} unknown` : ""})` : "";
+  $("counts").innerHTML = `<b class="c-yes">${c.yes}</b> yes${est} · <b class="c-maybe">${c.maybe}</b> maybe · ` +
+    `<b class="c-no">${c.no}</b> no · showing ${view.length}`;
+
+  // Progress over what can actually be reviewed: no 16k yet, and an image to look at.
+  const p = { yes: 0, maybe: 0, no: 0 }; let total = 0;
+  for (const e of entries) {
+    if (e.largest >= SIZE_16K || !e.has_preview) continue;
+    total++;
+    if (e.status) p[e.status]++;
+  }
+  const done = p.yes + p.maybe + p.no, pct = total ? 100 * done / total : 0;
+  const bar = `<span class="p-yes" style="width:${100 * p.yes / total}%"></span>` +
+              `<span class="p-maybe" style="width:${100 * p.maybe / total}%"></span>` +
+              `<span class="p-no" style="width:${100 * p.no / total}%"></span>`;
+  const text = `${done} of ${total} reviewed (${pct.toFixed(1)}%) · ${total - done} to go`;
+  $("progressBar").innerHTML = bar; $("progressBar").title = text;
+  $("counts").innerHTML = `<b>${done}</b>/${total} reviewed (${pct.toFixed(1)}%) · <b>${total - done}</b> to go · ` + $("counts").innerHTML;
+  $("lbProgress").innerHTML = text + `<div class="progress">${bar}</div>`;
+}
+
+async function mark(status) {
+  const targets = selected.size > 1 ? [...selected] : (view[focusIdx] ? [view[focusIdx].id] : []);
+  if (!targets.length) return;
+  const res = await fetch("/api/pick", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ ids: targets, status }) });
+  if (!res.ok) { toast("Saving failed"); return; }
+  const { changed } = await res.json();
+  for (const ch of changed) { const e = byId.get(ch.id); e.status = ch.status; updateCard(e); }
+  if (likeScores && $("sort").value === "like") likeScores = null;   // stale; recomputed on refresh
+  updateCounts();
+  if (targets.length > 1) { toast(`Marked ${targets.length} as ${status || "unmarked"}`); selected.clear(); updateSelectionClasses(); }
+  else if (status) {
+    // Move straight on to the next decision, in the big view too.
+    if ($("lb").classList.contains("open")) saveNote();
+    setFocus(focusIdx + 1);
+  }
+  if ($("lb").classList.contains("open")) fillLightbox();
+}
+
+async function showSimilar(e) {
+  const mode = $("mode").value;
+  const res = await fetch(`/api/similar?id=${e.id}&mode=${mode}`);
+  if (!res.ok) { toast("No fingerprint for that one (no image?)"); return; }
+  anchor = { kind: "similar", id: e.id, name: e.name, scores: await res.json() };
+  $("bannerText").textContent = `Most similar to ${e.name} (by ${mode})`;
+  $("banner").style.display = "block";
+  render(e.id); setFocus(0);
+}
+
+function showFamily(e) {
+  const root = byId.get(e.root);
+  anchor = { kind: "family", root: e.root, name: root ? root.name : e.name };
+  $("bannerText").textContent = `Family of ${anchor.name}`;
+  $("banner").style.display = "block";
+  render(e.id);
+}
+
+function clearAnchor() { anchor = null; $("banner").style.display = "none"; render(view[focusIdx]?.id); }
+
+async function refreshLike() {
+  if ($("sort").value !== "like") return;
+  const res = await fetch(`/api/like-yeses?mode=${$("mode").value}`);
+  likeScores = await res.json();
+  if (!Object.keys(likeScores).length) { toast("Mark some yeses first"); likeScores = null; }
+}
+
+/* lightbox */
+function openLightbox() { if (!view[focusIdx]) return; $("lb").classList.add("open"); fillLightbox(); }
+function closeLightbox() { saveNote(); $("lb").classList.remove("open"); }
+function fillLightbox() {
+  const e = view[focusIdx]; if (!e) return closeLightbox();
+  const img = $("lbImg");
+  if (img.dataset.id != e.id) {
+    img.dataset.id = e.id;
+    img.src = e.has_preview ? `/preview/${e.id}.jpg` : "";
+    if (e.has_preview) { const full = new Image(); full.onload = () => { if (img.dataset.id == e.id) img.src = full.src; }; full.src = `/full/${e.id}.jpg`; }
+    $("lbNote").value = e.note || "";
+  }
+  $("lbName").textContent = e.name;
+  document.querySelectorAll("#lb .marks button").forEach(b => b.classList.toggle("on", b.dataset.s === e.status));
+  const renders = e.renders.length ? e.renders.map(r => `${r.w}×${r.h}${r.hours != null ? " in " + fmtHours(r.hours) : ""}${r.finished === false ? " (unfinished)" : ""}`).join("<br>") : "none";
+  const root = byId.get(e.root);
+  $("lbInfo").innerHTML = `<dt>File</dt><dd>${e.file} #${e.index}</dd>
+    <dt>Layers</dt><dd>${e.layers ?? "?"}</dd>
+    <dt>16k est.</dt><dd>${e.est16k_hours != null ? "~" + fmtHours(e.est16k_hours) : "unknown (no timed render)"}</dd>
+    <dt>Renders</dt><dd>${renders}</dd>
+    <dt>Family</dt><dd>${root && root.id !== e.id ? root.name : "(root)"}</dd>
+    <dt>In list</dt><dd>${focusIdx + 1} of ${view.length}</dd>`;
+}
+async function saveNote() {
+  const e = byId.get(+$("lbImg").dataset.id);
+  if (!e || ($("lbNote").value || null) === (e.note || null)) return;
+  const res = await fetch("/api/pick", { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ id: e.id, status: e.status, note: $("lbNote").value }) });
+  if (res.ok) { e.note = $("lbNote").value || null; toast("Note saved"); }
+}
+
+/* events */
+function columns() {
+  const g = $("grid"); if (!g.children.length) return 1;
+  const top = g.children[0].offsetTop; let n = 0;
+  for (const c of g.children) { if (c.offsetTop !== top) break; n++; }
+  return Math.max(1, n);
+}
+
+document.addEventListener("keydown", ev => {
+  if (ev.target.matches("input, textarea, select")) {
+    if (ev.key === "Escape") ev.target.blur();
+    return;
+  }
+  const lb = $("lb").classList.contains("open");
+  const k = ev.key.toLowerCase();
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  if (k === "y" || k === "m" || k === "n") { mark({ y: "yes", m: "maybe", n: "no" }[k]); }
+  else if (k === "u") mark(null);
+  else if (k === "s" && view[focusIdx]) { if (lb) closeLightbox(); showSimilar(view[focusIdx]); }
+  else if (k === "f" && view[focusIdx]) { if (lb) closeLightbox(); showFamily(view[focusIdx]); }
+  else if (k === "r") { refreshLike().then(() => render(view[focusIdx]?.id)); }
+  else if (k === "/") { $("q").focus(); }
+  else if (k === "escape") { if (lb) closeLightbox(); else if ($("help").classList.contains("open")) $("help").classList.remove("open"); else if (anchor) clearAnchor(); else { selected.clear(); updateSelectionClasses(); } }
+  else if (k === "enter" || k === " ") { lb ? closeLightbox() : openLightbox(); }
+  else if (k === "arrowright") { saveNote(); setFocus(focusIdx + 1); if (lb) fillLightbox(); }
+  else if (k === "arrowleft") { saveNote(); setFocus(focusIdx - 1); if (lb) fillLightbox(); }
+  else if (k === "arrowdown" && !lb) setFocus(focusIdx + columns());
+  else if (k === "arrowup" && !lb) setFocus(Math.max(0, focusIdx - columns()));
+  else if (k === "?") $("help").classList.toggle("open");
+  else return;
+  ev.preventDefault();
+});
+
+$("grid").addEventListener("click", ev => {
+  const card = ev.target.closest(".card"); if (!card) return;
+  const idx = [...$("grid").children].indexOf(card);
+  const id = +card.dataset.id;
+  if (ev.shiftKey && focusIdx >= 0) {
+    const [a, b] = [Math.min(focusIdx, idx), Math.max(focusIdx, idx)];
+    for (let i = a; i <= b; i++) selected.add(view[i].id);
+  } else if (ev.ctrlKey || ev.metaKey) {
+    selected.has(id) ? selected.delete(id) : selected.add(id);
+  } else selected.clear();
+  setFocus(idx, false); updateSelectionClasses();
+});
+$("grid").addEventListener("dblclick", ev => { if (ev.target.closest(".card")) openLightbox(); });
+document.querySelectorAll("#lb .marks button").forEach(b => b.addEventListener("click", () => mark(b.dataset.s === view[focusIdx]?.status ? null : b.dataset.s)));
+$("lbClose").onclick = closeLightbox;
+$("lbSimilar").onclick = () => { const e = view[focusIdx]; closeLightbox(); showSimilar(e); };
+$("lbFamily").onclick = () => { const e = view[focusIdx]; closeLightbox(); showFamily(e); };
+$("lbNote").addEventListener("blur", saveNote);
+$("lb").addEventListener("click", ev => { if (ev.target.classList.contains("view")) closeLightbox(); });
+$("bannerClear").onclick = clearAnchor;
+$("helpBtn").onclick = () => $("help").classList.toggle("open");
+$("export").onclick = () => { location.href = "/export/yes.tsv"; };
+
+for (const id of ["show", "has16k", "imgs", "sort", "mode"]) {
+  $(id).value = store.get(id, $(id).value);
+  $(id).addEventListener("change", async () => {
+    store.set(id, $(id).value);
+    if (id === "sort" && $(id).value === "random") entries.forEach(e => randomKey.set(e.id, Math.random()));
+    if (id === "mode" && anchor && anchor.kind === "similar") return showSimilar(byId.get(anchor.id));
+    await refreshLike();
+    render(view[focusIdx]?.id);
+  });
+}
+$("size").value = store.get("size", 200);
+document.documentElement.style.setProperty("--card", $("size").value + "px");
+$("size").addEventListener("input", () => { document.documentElement.style.setProperty("--card", $("size").value + "px"); store.set("size", $("size").value); });
+$("size").addEventListener("change", () => render(view[focusIdx]?.id));
+let qTimer; $("q").addEventListener("input", () => { clearTimeout(qTimer); qTimer = setTimeout(() => render(view[focusIdx]?.id), 200); });
+
+(async () => {
+  entries = await (await fetch("/api/entries")).json();
+  entries.forEach(e => { byId.set(e.id, e); randomKey.set(e.id, Math.random()); });
+  await refreshLike();
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (hash.get("q")) $("q").value = hash.get("q");
+  if (hash.has("show")) $("show").value = hash.get("show");
+  if (hash.has("has16k")) $("has16k").value = hash.get("has16k");
+  render();
+  const target = byId.get(+(hash.get("similar") ?? hash.get("family") ?? NaN));
+  if (target && hash.has("similar")) await showSimilar(target);
+  else if (target) showFamily(target);
+  if (hash.has("open")) { setFocus(view.findIndex(e => e.id === +hash.get("open"))); openLightbox(); }
+})();
+</script>
+</body>
+</html>

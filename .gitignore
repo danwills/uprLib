@@ -1,2 +1,7 @@
 # Parsed-UPR cache (see UPRCache in uprLibrary.py), plus its SQLite WAL sidecar files.
 uprLibrary.cache.sqlite*
+# 16k picker: its preview/fingerprint cache, and the user's picks (never commit those).
+uprLibrary.picker/
+uprLibrary.picks.sqlite*
+# Python bytecode.
+__pycache__/
