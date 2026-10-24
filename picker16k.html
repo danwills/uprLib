@@ -23,7 +23,7 @@
     background: var(--panel2); color: var(--text); border: 1px solid var(--line);
     border-radius: 5px; padding: 4px 7px; font: inherit; }
   button { cursor: pointer; }
-  button:hover { border-color: var(--accent); }
+  @media (hover: hover) { button:hover { border-color: var(--accent); } }
   input[type=search] { width: 220px; }
   .counts { margin-left: auto; color: var(--dim); white-space: nowrap; }
   .counts b { color: var(--text); font-weight: 600; }
@@ -44,6 +44,11 @@
                 -webkit-box-orient: vertical; word-break: break-all; }
   .card .sub { color: var(--dim); font-size: 11px; margin-top: 2px; display: flex; gap: 8px; }
   .card.focus { border-color: var(--accent); }
+  .card .cmarks { display: flex; gap: 4px; padding: 0 6px 6px; }
+  .card .cmarks button { flex: 1; min-width: 0; padding: 3px 0; font-size: 11px; font-weight: 600; color: var(--dim); }
+  .card .cmarks button.on.yes { background: var(--yes); color: #111; }
+  .card .cmarks button.on.maybe { background: var(--maybe); color: #111; }
+  .card .cmarks button.on.no { background: var(--no); color: #111; }
   .card.sel { box-shadow: 0 0 0 3px #5aa0ff55 inset; background: #1f2633; }
   .card.s-yes { border-color: var(--yes); } .card.s-maybe { border-color: var(--maybe); } .card.s-no { border-color: var(--no); }
   .card.s-no .img { opacity: .45; }
@@ -84,7 +89,22 @@
   kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font: 11px monospace; }
   #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--panel2);
            border: 1px solid var(--line); border-radius: 6px; padding: 7px 14px; display: none; z-index: 40; }
-  @media (max-width: 800px) { #lb.open { grid-template-columns: 1fr; grid-template-rows: 60vh auto; } }
+  /* Phones: image on top, the panel below (scrolling if it's tall), so the mark buttons are on screen. */
+  @media (max-width: 800px) {
+    #lb { height: 100dvh; }
+    #lb.open { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
+    #lb .view img { max-height: 100%; }
+    #lb aside { border-left: 0; border-top: 1px solid var(--line); max-height: 55dvh; }
+    #help { left: 14px; right: 14px; max-width: none; }
+    .counts { white-space: normal; margin-left: 0; }
+    header { position: static; }   /* it's tall when wrapped; let it scroll away */
+  }
+  /* Touch screens: bigger mark buttons, and no keyboard hints. */
+  @media (pointer: coarse) {
+    #lb .marks button { padding: 14px 0; font-size: 16px; }
+    #lb .marks kbd, #lb .row kbd, #lb .hint { display: none; }
+    .card .cmarks button { padding: 9px 0; font-size: 13px; }
+  }
 </style>
 </head>
 <body>
@@ -138,11 +158,12 @@
   </aside>
 </div>
 
-<div id="help">
+<div id="help" title="Click to close">
   <table>
     <tr><td><kbd>←↑→↓</kbd></td><td>Move</td></tr>
     <tr><td><kbd>Y</kbd> <kbd>M</kbd> <kbd>N</kbd></td><td>Mark yes / maybe / no, then move on</td></tr>
     <tr><td><kbd>U</kbd></td><td>Clear the mark</td></tr>
+    <tr><td>Card buttons</td><td>Mark that card without moving (tap a lit one to clear it)</td></tr>
     <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Big view</td></tr>
     <tr><td><kbd>S</kbd></td><td>Sort by similarity to this one</td></tr>
     <tr><td><kbd>F</kbd></td><td>Show its family (same name root)</td></tr>
@@ -227,7 +248,8 @@ function cardHtml(e, score) {
   const big = e.largest ? `<span title="largest render">${renderLabel(e.largest)}</span>` : "";
   return `<div class="card${st}" data-id="${e.id}">${img}${badge}${sc}<div class="meta">
     <div class="name" title="${e.name} (${e.file} #${e.index})">${shortName(e.name)}</div>
-    <div class="sub">${est}${big}<span>${e.layers ?? "?"}L</span></div></div></div>`;
+    <div class="sub">${est}${big}<span>${e.layers ?? "?"}L</span></div></div>
+    <div class="cmarks">${["yes", "maybe", "no"].map(s => `<button class="${s}${e.status === s ? " on" : ""}" data-s="${s}">${s[0].toUpperCase() + s.slice(1)}</button>`).join("")}</div></div>`;
 }
 
 function render(keepFocusId) {
@@ -299,8 +321,9 @@ function updateCounts() {
   $("lbProgress").innerHTML = text + `<div class="progress">${bar}</div>`;
 }
 
-async function mark(status) {
-  const targets = selected.size > 1 ? [...selected] : (view[focusIdx] ? [view[focusIdx].id] : []);
+// With onlyId (a card's own buttons), marks just that card and stays put.
+async function mark(status, onlyId = null) {
+  const targets = onlyId != null ? [onlyId] : selected.size > 1 ? [...selected] : (view[focusIdx] ? [view[focusIdx].id] : []);
   if (!targets.length) return;
   const res = await fetch("/api/pick", { method: "POST", headers: { "Content-Type": "application/json" },
                                          body: JSON.stringify({ ids: targets, status }) });
@@ -310,9 +333,9 @@ async function mark(status) {
   if (likeScores && $("sort").value === "like") likeScores = null;   // stale; recomputed on refresh
   updateCounts();
   if (targets.length > 1) { toast(`Marked ${targets.length} as ${status || "unmarked"}`); selected.clear(); updateSelectionClasses(); }
-  else if (status) {
+  else if (status && onlyId == null) {
     // Move straight on to the next decision, in the big view too.
-    if ($("lb").classList.contains("open")) saveNote();
+    if ($("lb").classList.contains("open")) { saveNote(); toast(`${status[0].toUpperCase() + status.slice(1)} ✓  next one`); }
     setFocus(focusIdx + 1);
   }
   if ($("lb").classList.contains("open")) fillLightbox();
@@ -409,6 +432,13 @@ document.addEventListener("keydown", ev => {
   ev.preventDefault();
 });
 
+// A card's own Yes/Maybe/No buttons: mark that card (tap a lit one to clear it), nothing else.
+$("grid").addEventListener("click", ev => {
+  const b = ev.target.closest(".cmarks button"); if (!b) return;
+  ev.stopPropagation();
+  const e = byId.get(+b.closest(".card").dataset.id);
+  mark(b.dataset.s === e.status ? null : b.dataset.s, e.id);
+}, true);
 $("grid").addEventListener("click", ev => {
   const card = ev.target.closest(".card"); if (!card) return;
   const idx = [...$("grid").children].indexOf(card);
@@ -421,7 +451,19 @@ $("grid").addEventListener("click", ev => {
   } else selected.clear();
   setFocus(idx, false); updateSelectionClasses();
 });
-$("grid").addEventListener("dblclick", ev => { if (ev.target.closest(".card")) openLightbox(); });
+$("grid").addEventListener("dblclick", ev => { if (ev.target.closest(".card") && !ev.target.closest(".cmarks")) openLightbox(); });
+// Touch screens have no double-click or keyboard, so a tap opens the big view straight away.
+const touchScreen = matchMedia("(pointer: coarse)");
+$("grid").addEventListener("click", ev => { if (touchScreen.matches && ev.target.closest(".card")) openLightbox(); });
+// Swipe left/right on the big view for next/previous.
+let swipeX = null;
+$("lb").querySelector(".view").addEventListener("touchstart", ev => { swipeX = ev.touches.length === 1 ? ev.touches[0].clientX : null; }, { passive: true });
+$("lb").querySelector(".view").addEventListener("touchend", ev => {
+  if (swipeX === null) return;
+  const dx = ev.changedTouches[0].clientX - swipeX; swipeX = null;
+  if (Math.abs(dx) < 50) return;
+  saveNote(); setFocus(focusIdx + (dx < 0 ? 1 : -1)); fillLightbox();
+});
 document.querySelectorAll("#lb .marks button").forEach(b => b.addEventListener("click", () => mark(b.dataset.s === view[focusIdx]?.status ? null : b.dataset.s)));
 $("lbClose").onclick = closeLightbox;
 $("lbSimilar").onclick = () => { const e = view[focusIdx]; closeLightbox(); showSimilar(e); };
@@ -430,6 +472,7 @@ $("lbNote").addEventListener("blur", saveNote);
 $("lb").addEventListener("click", ev => { if (ev.target.classList.contains("view")) closeLightbox(); });
 $("bannerClear").onclick = clearAnchor;
 $("helpBtn").onclick = () => $("help").classList.toggle("open");
+$("help").onclick = () => $("help").classList.remove("open");
 $("export").onclick = () => { location.href = "/export/yes.tsv"; };
 
 for (const id of ["show", "has16k", "imgs", "sort", "mode"]) {

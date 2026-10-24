@@ -2,7 +2,8 @@
 """16k picker: a local web page for triaging which fractals deserve a 16k
 render.
 
-    python3 picker16k.py            # then open http://localhost:8016
+    python3 picker16k.py            # then open http://localhost:8016 (or this machine's LAN address)
+    python3 picker16k.py --host 127.0.0.1    # this machine only
     python3 picker16k.py --port 9000 --workers 6
 
 Loads the library with uprLib's own pipeline (loadLibraryData), so entries,
@@ -30,6 +31,7 @@ import io
 import json
 import os
 import random
+import socket
 import sqlite3
 import sys
 import threading
@@ -442,9 +444,20 @@ def makeHandler(picker):
     return Handler
 
 
+def lanAddress():
+    """This machine's address on the LAN (the one its default route uses)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        try:
+            s.connect(("10.255.255.255", 1))   # UDP: nothing is sent
+            return s.getsockname()[0]
+        except OSError:
+            return socket.gethostname()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--port", type=int, default=8016)
+    parser.add_argument("--host", default="0.0.0.0", help="address to listen on (default: all, so the LAN can reach it)")
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 2) - 4))
     parser.add_argument("--build-only", action="store_true", help="build the cache and exit")
     parser.add_argument("--no-build", action="store_true", help="serve with whatever is cached already")
@@ -464,8 +477,10 @@ def main():
     picker = Picker(entries, picks, features)
     no16k = sum(1 for e in entries if e['largest'] < SIZE_16K)
     print(f"{len(entries)} entries, {no16k} without a 16k, {int(picker.mask.sum())} with previews.")
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), makeHandler(picker))
+    server = ThreadingHTTPServer((args.host, args.port), makeHandler(picker))
     print(f"16k picker on http://localhost:{args.port}")
+    if args.host not in ("127.0.0.1", "localhost"):
+        print(f"  and on the LAN at http://{lanAddress()}:{args.port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
